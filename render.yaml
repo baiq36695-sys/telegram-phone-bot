@@ -1,12 +1,1 @@
-services:
-  - type: web
-    name: telegram-phone-bot
-    env: python
-    buildCommand: pip install -r requirements.txt
-    startCommand: python main.py
-    envVars:
-      - key: BOT_TOKEN
-        value: 8424823618:AAFwjIYQH86nKXOiJUybfBRio7sRJl-GUEU
-      - key: PYTHONUNBUFFERED
-        value: 1
-    plan: free
+
