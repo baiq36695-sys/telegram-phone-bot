@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-电话号码重复检测机器人 - 超级增强版
+电话号码重复检测机器人 - 超级增强版 (修复事件循环问题)
 增强版警告系统 + 风险评估 + 安全提醒
 """
 
@@ -55,6 +55,7 @@ user_groups: Dict[int, Dict[str, Any]] = defaultdict(lambda: {
     'security_alerts': []  # 安全警报历史
 })
 shutdown_event = threading.Event()
+bot_application = None  # 全局应用实例
 
 # 风险评估等级
 RISK_LEVELS = {
@@ -868,16 +869,34 @@ def run_flask():
     port = int(os.environ.get('PORT', 10000))
     logger.info(f"启动增强版Flask服务器，端口: {port}")
     
-    app.run(
-        host='0.0.0.0',
-        port=port,
-        debug=False,
-        use_reloader=False,
-        threaded=True
-    )
+    try:
+        app.run(
+            host='0.0.0.0',
+            port=port,
+            debug=False,
+            use_reloader=False,
+            threaded=True
+        )
+    except Exception as e:
+        logger.error(f"Flask服务器运行错误: {e}")
+
+async def shutdown_application():
+    """优雅关闭应用程序"""
+    global bot_application
+    try:
+        logger.info("正在停止应用程序...")
+        if bot_application:
+            await bot_application.stop()
+            logger.info("机器人应用已停止")
+        shutdown_event.set()
+        logger.info("应用程序已安全关闭")
+    except Exception as e:
+        logger.error(f"关闭应用时出错: {e}")
 
 async def run_bot():
-    """运行Telegram机器人"""
+    """运行Telegram机器人 - 修复版本"""
+    global bot_application
+    
     # 获取Bot Token
     bot_token = os.environ.get('TELEGRAM_BOT_TOKEN')
     if not bot_token:
@@ -886,37 +905,48 @@ async def run_bot():
     
     try:
         # 创建应用
-        application = Application.builder().token(bot_token).build()
+        bot_application = Application.builder().token(bot_token).build()
         
         # 添加处理器
-        application.add_handler(CommandHandler("start", start_command))
-        application.add_handler(CommandHandler("clear", clear_command))
-        application.add_handler(CommandHandler("stats", stats_command))
-        application.add_handler(CommandHandler("export", export_command))
-        application.add_handler(CommandHandler("security", security_command))
-        application.add_handler(CommandHandler("help", help_command))
-        application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+        bot_application.add_handler(CommandHandler("start", start_command))
+        bot_application.add_handler(CommandHandler("clear", clear_command))
+        bot_application.add_handler(CommandHandler("stats", stats_command))
+        bot_application.add_handler(CommandHandler("export", export_command))
+        bot_application.add_handler(CommandHandler("security", security_command))
+        bot_application.add_handler(CommandHandler("help", help_command))
+        bot_application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
         
         logger.info("🚀 超级增强版电话号码检测机器人已启动！")
         logger.info("✅ 集成智能风险评估系统")
         logger.info("🛡️ 启用多级安全警告功能")
         logger.info("🔧 使用nest_asyncio解决事件循环冲突")
         
-        # 运行机器人
-        await application.run_polling(drop_pending_updates=True)
+        # 运行机器人 - 使用更安全的方式
+        await bot_application.run_polling(
+            drop_pending_updates=True,
+            close_loop=False  # 关键修复：不让 telegram 库关闭事件循环
+        )
         
     except Exception as e:
         logger.error(f"机器人运行错误: {e}")
-        shutdown_event.set()
+        await shutdown_application()
 
 def signal_handler(signum, frame):
-    """信号处理器 - 用于优雅关闭"""
+    """信号处理器 - 优雅关闭"""
     logger.info(f"收到信号 {signum}，正在关闭...")
     shutdown_event.set()
-    sys.exit(0)
+    
+    # 安全退出
+    try:
+        # 如果当前有事件循环在运行，使用 create_task
+        loop = asyncio.get_running_loop()
+        loop.create_task(shutdown_application())
+    except RuntimeError:
+        # 没有运行中的事件循环，直接退出
+        sys.exit(0)
 
 def main():
-    """主函数 - 超级增强版解决方案"""
+    """主函数 - 修复版解决方案"""
     logger.info("正在启动超级增强版应用...")
     logger.info("🔧 已应用nest_asyncio，一次性解决事件循环冲突")
     logger.info("🛡️ 集成智能风险评估系统")
@@ -937,9 +967,23 @@ def main():
         
         logger.info("启动超级增强版Telegram机器人...")
         
-        # 现在可以安全地在主线程中运行asyncio
-        asyncio.run(run_bot())
+        # 修复事件循环问题的关键代码
+        try:
+            # 检查是否已有事件循环在运行
+            loop = asyncio.get_running_loop()
+            logger.info("检测到运行中的事件循环，使用现有循环")
+            # 在现有循环中创建任务
+            task = loop.create_task(run_bot())
+            # 等待任务完成
+            loop.run_until_complete(task)
+        except RuntimeError:
+            # 没有运行中的事件循环，创建新的
+            logger.info("创建新的事件循环")
+            asyncio.run(run_bot())
         
+    except KeyboardInterrupt:
+        logger.info("收到键盘中断信号")
+        shutdown_event.set()
     except Exception as e:
         logger.error(f"程序运行错误: {e}")
         shutdown_event.set()
