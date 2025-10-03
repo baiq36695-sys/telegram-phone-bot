@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
-电话号码重复检测机器人 - 超级增强版 (修复事件循环问题)
+电话号码重复检测机器人 - 超级增强版 (完全修复版)
 增强版警告系统 + 风险评估 + 安全提醒
+修复所有事件循环和部署问题
 """
 
 import os
@@ -17,16 +18,12 @@ import threading
 import time
 import hashlib
 
-# 首先安装并应用nest_asyncio来解决事件循环冲突
+# 导入并应用nest_asyncio
 try:
     import nest_asyncio
     nest_asyncio.apply()
-    logger = logging.getLogger(__name__)
-    logger.info("✅ nest_asyncio已应用，事件循环冲突已解决")
 except ImportError:
-    # 如果没有nest_asyncio，我们手动安装
     import subprocess
-    import sys
     subprocess.check_call([sys.executable, "-m", "pip", "install", "nest-asyncio"])
     import nest_asyncio
     nest_asyncio.apply()
@@ -48,14 +45,19 @@ app = Flask(__name__)
 # 全局变量 - 增强版数据结构
 user_groups: Dict[int, Dict[str, Any]] = defaultdict(lambda: {
     'phones': set(),
-    'phone_history': [],  # 存储每次检测的历史
-    'risk_scores': {},    # 存储风险评分
-    'warnings_issued': set(),  # 已发出的警告
+    'phone_history': [],
+    'risk_scores': {},
+    'warnings_issued': set(),
     'last_activity': None,
-    'security_alerts': []  # 安全警报历史
+    'security_alerts': []
 })
+
+# 系统状态管理
 shutdown_event = threading.Event()
-bot_application = None  # 全局应用实例
+bot_application = None
+is_running = False
+restart_count = 0
+max_restart_attempts = 5
 
 # 风险评估等级
 RISK_LEVELS = {
@@ -115,16 +117,13 @@ def extract_phone_numbers(text: str) -> Set[str]:
 
 def find_duplicates(phones: Set[str]) -> Set[str]:
     """查找重复的电话号码"""
-    # 创建标准化映射
     normalized_map = {}
     duplicates = set()
     
     for phone in phones:
-        # 标准化：移除所有空格、连字符等格式字符，只保留数字和+号
         normalized = re.sub(r'[^\d+]', '', phone)
         
         if normalized in normalized_map:
-            # 发现重复，添加原始格式和已存在的格式
             duplicates.add(phone)
             duplicates.add(normalized_map[normalized])
         else:
@@ -134,7 +133,6 @@ def find_duplicates(phones: Set[str]) -> Set[str]:
 
 def categorize_phone_number(phone: str) -> str:
     """识别电话号码的类型和国家"""
-    # 移除格式字符进行匹配
     clean_phone = re.sub(r'[^\d+]', '', phone)
     
     if re.match(r'\+60[1][0-9]', clean_phone):
@@ -186,7 +184,6 @@ def assess_phone_risk(phone: str, chat_data: Dict[str, Any]) -> Tuple[str, List[
     warnings = []
     risk_score = 0
     
-    # 基础风险评估
     clean_phone = re.sub(r'[^\d+]', '', phone)
     
     # 1. 重复度检查
@@ -242,14 +239,12 @@ def generate_security_recommendations(phone_numbers: Set[str], risk_level: str) 
     """生成安全建议"""
     recommendations = []
     
-    # 基础建议
     recommendations.extend([
         "🛡️ 请确保只与信任的联系人分享电话号码",
         "🔒 避免在公开场合大声说出完整电话号码",
         "📱 定期检查手机安全设置和隐私权限"
     ])
     
-    # 根据风险等级添加特定建议
     if risk_level in ['HIGH', 'CRITICAL']:
         recommendations.extend([
             "🚨 高风险警告：建议立即验证号码来源",
@@ -260,7 +255,7 @@ def generate_security_recommendations(phone_numbers: Set[str], risk_level: str) 
     if len(phone_numbers) > 5:
         recommendations.append("📊 大量号码检测：建议分批处理以确保数据准确性")
     
-    return recommendations[:6]  # 限制建议数量
+    return recommendations[:6]
 
 def generate_comprehensive_warnings(phone_numbers: Set[str], chat_data: Dict[str, Any]) -> Dict[str, Any]:
     """生成综合警告系统"""
@@ -311,9 +306,12 @@ def generate_comprehensive_warnings(phone_numbers: Set[str], chat_data: Dict[str
 @app.route('/', methods=['GET', 'HEAD'])
 def health_check():
     """健康检查端点"""
+    global is_running, restart_count
     return jsonify({
         'status': 'healthy',
         'service': 'telegram-phone-bot-enhanced',
+        'bot_running': is_running,
+        'restart_count': restart_count,
         'nest_asyncio': 'enabled',
         'features': ['risk_assessment', 'security_warnings', 'comprehensive_analysis'],
         'timestamp': time.time()
@@ -322,13 +320,22 @@ def health_check():
 @app.route('/status')
 def status():
     """状态端点"""
+    global is_running
     return jsonify({
-        'bot_status': 'running' if not shutdown_event.is_set() else 'stopped',
+        'bot_status': 'running' if is_running else 'stopped',
         'groups_monitored': len(user_groups),
         'total_phone_numbers': sum(len(data['phones']) for data in user_groups.values()),
         'event_loop_fix': 'nest_asyncio',
         'enhanced_features': 'enabled'
     })
+
+@app.route('/restart')
+def force_restart():
+    """强制重启机器人的端点"""
+    global is_running
+    is_running = False
+    start_bot_thread()
+    return jsonify({'message': 'Bot restart initiated', 'timestamp': datetime.datetime.now().isoformat()})
 
 # Telegram机器人函数
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -864,6 +871,19 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.error(f"处理消息时出错: {e}")
         await update.message.reply_text("❌ 处理消息时出现错误，系统正在自动恢复...")
 
+async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """错误处理器"""
+    logger.error(f"更新 {update} 引起了错误 {context.error}")
+    
+    if update and update.effective_message:
+        try:
+            await update.effective_message.reply_text(
+                "❌ 处理过程中发生错误，系统正在自动恢复...",
+                parse_mode='Markdown'
+            )
+        except Exception as e:
+            logger.error(f"发送错误消息失败: {e}")
+
 def run_flask():
     """在独立线程中运行Flask"""
     port = int(os.environ.get('PORT', 10000))
@@ -880,22 +900,9 @@ def run_flask():
     except Exception as e:
         logger.error(f"Flask服务器运行错误: {e}")
 
-async def shutdown_application():
-    """优雅关闭应用程序"""
-    global bot_application
-    try:
-        logger.info("正在停止应用程序...")
-        if bot_application:
-            await bot_application.stop()
-            logger.info("机器人应用已停止")
-        shutdown_event.set()
-        logger.info("应用程序已安全关闭")
-    except Exception as e:
-        logger.error(f"关闭应用时出错: {e}")
-
 async def run_bot():
     """运行Telegram机器人 - 修复版本"""
-    global bot_application
+    global bot_application, is_running, restart_count
     
     # 获取Bot Token
     bot_token = os.environ.get('TELEGRAM_BOT_TOKEN')
@@ -904,8 +911,13 @@ async def run_bot():
         return
     
     try:
+        logger.info(f"正在启动 Telegram 机器人... (第 {restart_count + 1} 次)")
+        
         # 创建应用
         bot_application = Application.builder().token(bot_token).build()
+        
+        # 添加错误处理器
+        bot_application.add_error_handler(error_handler)
         
         # 添加处理器
         bot_application.add_handler(CommandHandler("start", start_command))
@@ -916,41 +928,94 @@ async def run_bot():
         bot_application.add_handler(CommandHandler("help", help_command))
         bot_application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
         
+        is_running = True
         logger.info("🚀 超级增强版电话号码检测机器人已启动！")
         logger.info("✅ 集成智能风险评估系统")
         logger.info("🛡️ 启用多级安全警告功能")
         logger.info("🔧 使用nest_asyncio解决事件循环冲突")
         
-        # 运行机器人 - 使用更安全的方式
+        # 关键修复：运行机器人，避免事件循环冲突
         await bot_application.run_polling(
             drop_pending_updates=True,
-            close_loop=False  # 关键修复：不让 telegram 库关闭事件循环
+            close_loop=False,  # 不让库关闭事件循环
+            stop_signals=None  # 禁用信号处理，避免冲突
         )
         
     except Exception as e:
         logger.error(f"机器人运行错误: {e}")
-        await shutdown_application()
+        is_running = False
+        raise e
+    finally:
+        is_running = False
+        logger.info("机器人已停止运行")
+
+def start_bot_thread():
+    """在新线程中启动机器人，带有自动重启功能"""
+    global bot_thread, is_running, restart_count, max_restart_attempts
+    
+    def run_async_bot():
+        global restart_count, is_running
+        
+        while restart_count < max_restart_attempts:
+            try:
+                # 创建新的事件循环
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                
+                # 运行机器人
+                loop.run_until_complete(run_bot())
+                
+                # 如果正常退出，不重启
+                break
+                
+            except Exception as e:
+                restart_count += 1
+                is_running = False
+                
+                logger.error(f"机器人线程错误 (第 {restart_count} 次): {e}")
+                
+                if restart_count < max_restart_attempts:
+                    wait_time = min(30, 5 * restart_count)  # 指数退避
+                    logger.info(f"等待 {wait_time} 秒后重启...")
+                    time.sleep(wait_time)
+                else:
+                    logger.error(f"达到最大重启次数 ({max_restart_attempts})，停止重启")
+                    break
+            finally:
+                try:
+                    loop.close()
+                except:
+                    pass
+    
+    if 'bot_thread' not in globals() or not bot_thread.is_alive():
+        bot_thread = threading.Thread(target=run_async_bot, daemon=True)
+        bot_thread.start()
+        logger.info("机器人线程已启动，启用自动重启功能")
+
+def health_check_thread():
+    """健康检查线程，监控机器人状态"""
+    global is_running, restart_count, max_restart_attempts
+    
+    while True:
+        time.sleep(60)  # 每分钟检查一次
+        
+        if not is_running and restart_count < max_restart_attempts:
+            logger.warning("检测到机器人停止运行，尝试重启...")
+            start_bot_thread()
 
 def signal_handler(signum, frame):
     """信号处理器 - 优雅关闭"""
     logger.info(f"收到信号 {signum}，正在关闭...")
     shutdown_event.set()
-    
-    # 安全退出
-    try:
-        # 如果当前有事件循环在运行，使用 create_task
-        loop = asyncio.get_running_loop()
-        loop.create_task(shutdown_application())
-    except RuntimeError:
-        # 没有运行中的事件循环，直接退出
-        sys.exit(0)
+    sys.exit(0)
 
 def main():
-    """主函数 - 修复版解决方案"""
+    """主函数 - 完全修复版"""
     logger.info("正在启动超级增强版应用...")
-    logger.info("🔧 已应用nest_asyncio，一次性解决事件循环冲突")
+    logger.info("🔧 已应用nest_asyncio，解决事件循环冲突")
     logger.info("🛡️ 集成智能风险评估系统")
     logger.info("🚨 启用多级安全警告功能")
+    logger.info("🔄 启用自动重启和故障恢复机制")
     
     # 设置信号处理
     signal.signal(signal.SIGINT, signal_handler)
@@ -965,21 +1030,18 @@ def main():
         time.sleep(3)
         logger.info("增强版Flask服务器已在后台启动")
         
-        logger.info("启动超级增强版Telegram机器人...")
+        # 启动机器人线程（带自动重启功能）
+        start_bot_thread()
         
-        # 修复事件循环问题的关键代码
-        try:
-            # 检查是否已有事件循环在运行
-            loop = asyncio.get_running_loop()
-            logger.info("检测到运行中的事件循环，使用现有循环")
-            # 在现有循环中创建任务
-            task = loop.create_task(run_bot())
-            # 等待任务完成
-            loop.run_until_complete(task)
-        except RuntimeError:
-            # 没有运行中的事件循环，创建新的
-            logger.info("创建新的事件循环")
-            asyncio.run(run_bot())
+        # 启动健康检查线程
+        health_thread = threading.Thread(target=health_check_thread, daemon=True)
+        health_thread.start()
+        
+        logger.info("所有服务已启动，系统正在运行...")
+        
+        # 保持主线程运行
+        while not shutdown_event.is_set():
+            time.sleep(1)
         
     except KeyboardInterrupt:
         logger.info("收到键盘中断信号")
