@@ -2,8 +2,8 @@
 """
 Telegram电话号码重复检测机器人 - Render.com版本
 24/7云端运行版本
-支持多国电话号码格式（中国 + 马来西亚）
 """
+
 import asyncio
 import json
 import os
@@ -14,21 +14,28 @@ from datetime import datetime
 from typing import Dict, Set
 import threading
 from flask import Flask
+
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
+
 # 配置日志
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO
 )
 logger = logging.getLogger(__name__)
+
 # 机器人令牌 - 从环境变量读取（更安全）
 BOT_TOKEN = os.getenv('BOT_TOKEN', '8424823618:AAFwjIYQH86nKXOiJUybfBRio7sRJl-GUEU')
+
 # 数据存储文件
 DATA_FILE = 'phone_numbers_data.json'
+
 # 用于存储电话号码的字典
 phone_data = defaultdict(lambda: {'count': 0, 'users': set(), 'first_seen': None})
+
 # Flask应用 - 用于健康检查
 app = Flask(__name__)
+
 @app.route('/')
 def health_check():
     """健康检查端点"""
@@ -38,6 +45,7 @@ def health_check():
         'timestamp': datetime.now().isoformat(),
         'total_numbers': len(phone_data)
     }
+
 @app.route('/stats')
 def get_stats():
     """获取统计信息"""
@@ -46,6 +54,7 @@ def get_stats():
         'total_reports': sum(data['count'] for data in phone_data.values()),
         'last_updated': datetime.now().isoformat()
     }
+
 def load_data():
     """从文件加载数据"""
     global phone_data
@@ -60,6 +69,7 @@ def load_data():
             logger.info(f"成功加载 {len(phone_data)} 个电话号码记录")
     except Exception as e:
         logger.error(f"加载数据时出错: {e}")
+
 def save_data():
     """保存数据到文件"""
     try:
@@ -76,61 +86,54 @@ def save_data():
         logger.info("数据已保存")
     except Exception as e:
         logger.error(f"保存数据时出错: {e}")
+
 def extract_phone_numbers(text: str) -> Set[str]:
-    """从文本中提取电话号码 - 支持多国格式"""
+    """从文本中提取电话号码"""
     patterns = [
-        # 中国手机号码
-        r'1[3-9]\d{9}',                              # 中国手机号
-        r'\+86\s*1[3-9]\d{9}',                       # 带国际区号的中国手机号
-        
-        # 马来西亚电话号码
-        r'\+60\s*[1-9]\d?\s*-?\s*\d{3,4}\s*-?\s*\d{4}',  # +60 11-2896 2309 格式
-        r'\+60\s*[1-9]\d{7,8}',                      # +60112896309 格式
-        r'60\s*[1-9]\d?\s*-?\s*\d{3,4}\s*-?\s*\d{4}',    # 60 11-2896 2309 格式
-        
-        # 通用格式
-        r'\d{3}-\d{4}-\d{4}',                        # xxx-xxxx-xxxx格式
-        r'\d{3}\s\d{4}\s\d{4}',                      # xxx xxxx xxxx格式
-        r'\(\d{3}\)\s*\d{3}-\d{4}',                  # (xxx) xxx-xxxx格式
-        r'\+\d{1,3}\s*[\d\s\-]{8,15}',               # 通用国际格式
+        r'1[3-9]\d{9}',                    # 中国手机号
+        r'\+86\s*1[3-9]\d{9}',             # 带国际区号的中国手机号
+        r'\d{3}-\d{4}-\d{4}',              # xxx-xxxx-xxxx格式
+        r'\d{3}\s\d{4}\s\d{4}',            # xxx xxxx xxxx格式
+        r'\(\d{3}\)\s*\d{3}-\d{4}',        # (xxx) xxx-xxxx格式
+        r'\+\d{1,3}\s*\d{10,14}',          # 国际格式
     ]
     
     phone_numbers = set()
     for pattern in patterns:
         matches = re.findall(pattern, text)
         for match in matches:
-            # 清理号码，保留数字和+号
-            clean_number = re.sub(r'[\s\-\(\)]', '', match)
-            
-            # 验证号码长度
-            digit_count = len(re.sub(r'[^\d]', '', clean_number))
-            if digit_count >= 8:  # 至少8位数字
+            clean_number = re.sub(r'[\s\-\(\)\+]', '', match)
+            if len(clean_number) >= 10:
                 phone_numbers.add(clean_number)
     
     return phone_numbers
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """处理/start命令"""
     welcome_message = """
 🤖 **电话号码重复检测机器人**
+
 我会监控群组中的消息，检测重复发送的电话号码并发出警告。
-**支持格式：**
-🇨🇳 中国：+86 138 0013 8000 / 13800138000
-🇲🇾 马来西亚：+60 11-2896 2309 / +60112896309
+
 **功能：**
 • 自动检测消息中的电话号码
 • 标记重复出现的号码
 • 统计功能（管理员可用）
+
 **命令：**
 /start - 显示此帮助信息
 /stats - 查看统计信息（仅管理员）
 /clear - 清除所有数据（仅管理员）
+
 现在可以在群组中使用了！
     """
     await update.message.reply_text(welcome_message, parse_mode='Markdown')
+
 async def check_for_duplicates(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """检查消息中是否有重复的电话号码"""
     if not update.message or not update.message.text:
         return
+
     message_text = update.message.text
     user_id = update.effective_user.id
     username = update.effective_user.username or "未知用户"
@@ -151,9 +154,11 @@ async def check_for_duplicates(update: Update, context: ContextTypes.DEFAULT_TYP
             masked_phone = phone[:3] + "*" * (len(phone) - 6) + phone[-3:]
             warning_message = f"""
 ⚠️ **检测到重复电话号码！**
+
 号码：`{masked_phone}`
 出现次数：{phone_data[phone]['count']}
 首次发现：{phone_data[phone]['first_seen'][:10]}
+
 请注意可能的重复或垃圾信息！
             """
             await update.message.reply_text(warning_message, parse_mode='Markdown')
@@ -161,6 +166,7 @@ async def check_for_duplicates(update: Update, context: ContextTypes.DEFAULT_TYP
     # 保存数据
     if phone_numbers:
         save_data()
+
 async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """显示统计信息（仅管理员）"""
     user_id = update.effective_user.id
@@ -177,13 +183,16 @@ async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     
     stats_message = f"""
 📊 **统计信息**
+
 总电话号码：{total_numbers}
 总报告次数：{total_reports}
 重复号码：{duplicates}
 唯一号码：{total_numbers - duplicates}
+
 🕒 最后更新：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
     """
     await update.message.reply_text(stats_message, parse_mode='Markdown')
+
 async def clear_data(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """清除所有数据（仅管理员）"""
     user_id = update.effective_user.id
@@ -199,10 +208,12 @@ async def clear_data(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     save_data()
     
     await update.message.reply_text("✅ 所有数据已清除")
+
 def run_flask():
     """在单独线程中运行Flask应用"""
     port = int(os.environ.get('PORT', 10000))
     app.run(host='0.0.0.0', port=port, debug=False)
+
 async def run_bot():
     """运行Telegram机器人"""
     # 加载数据
@@ -222,6 +233,7 @@ async def run_bot():
     
     # 启动机器人
     await application.run_polling(drop_pending_updates=True)
+
 def main():
     """主函数"""
     # 在单独线程中启动Flask
@@ -230,5 +242,6 @@ def main():
     
     # 运行Telegram机器人
     asyncio.run(run_bot())
+
 if __name__ == '__main__':
     main()
