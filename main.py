@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-兼容版本的Telegram电话号码检测机器人 v6.1
-专门解决马来西亚格式 + 兼容性问题
+单线程版本的Telegram电话号码检测机器人 v6.2
+解决线程兼容性问题
 """
 
 import os
@@ -10,7 +10,6 @@ import asyncio
 import logging
 import re
 import json
-import threading
 import time
 from datetime import datetime, timedelta
 from typing import Dict, Set, List, Optional, Any
@@ -25,9 +24,6 @@ from telegram.ext import (
 )
 from telegram.constants import ParseMode
 from telegram.error import NetworkError, TelegramError
-
-# 导入Flask相关库
-from flask import Flask, jsonify, request, render_template_string
 
 # 配置日志
 logging.basicConfig(
@@ -55,11 +51,7 @@ user_data_storage = defaultdict(lambda: {
 })
 
 # 系统状态管理
-shutdown_event = threading.Event()
-bot_application = None
 is_running = False
-flask_thread = None
-bot_thread = None
 
 # 风险评估等级
 RISK_LEVELS = {
@@ -235,10 +227,11 @@ def generate_detailed_html_report(user_data: dict, new_phones: set, duplicates: 
     report_lines.append("")
     
     # 国家分类统计
-    report_lines.append("📊 <b>号码分类统计</b>：")
-    for country, count in sorted(country_stats.items()):
-        report_lines.append(f"• {country}：<b>{count}</b> 个")
-    report_lines.append("")
+    if country_stats:
+        report_lines.append("📊 <b>号码分类统计</b>：")
+        for country, count in sorted(country_stats.items()):
+            report_lines.append(f"• {country}：<b>{count}</b> 个")
+        report_lines.append("")
     
     # 新增号码详情
     if new_phones - duplicates:
@@ -278,13 +271,13 @@ def generate_detailed_html_report(user_data: dict, new_phones: set, duplicates: 
     report_lines.append(f"• HTML渲染：✅ 已启用")
     report_lines.append(f"• 红色警告：✅ 已启用")
     report_lines.append(f"• 马来西亚格式：✅ 完全支持")
-    report_lines.append(f"• 重复检测：✅ v6.1 兼容版")
+    report_lines.append(f"• 单线程模式：✅ v6.2 稳定版")
     report_lines.append("")
     
     # 分隔线和版本信息
     report_lines.append("=" * 45)
-    report_lines.append("🤖 <b>电话号码检测系统兼容版</b> v6.1")
-    report_lines.append("🚀 <b>马来西亚格式完全支持 + 兼容性修复</b>")
+    report_lines.append("🤖 <b>电话号码检测系统单线程版</b> v6.2")
+    report_lines.append("🚀 <b>马来西亚格式支持 + 线程兼容性修复</b>")
     
     return '\n'.join(report_lines)
 
@@ -295,21 +288,21 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     
     welcome_message = (
         f"👋 欢迎使用，{user_name}！\n\n"
-        "🤖 <b>电话号码检测系统兼容版</b> v6.1\n"
-        "🎯 <b>马来西亚格式完全支持 + 兼容性修复</b>\n\n"
+        "🤖 <b>电话号码检测系统单线程版</b> v6.2\n"
+        "🎯 <b>马来西亚格式支持 + 线程兼容性修复</b>\n\n"
         "📱 <b>功能特色</b>：\n"
         "• 🔍 智能电话号码识别\n"
         "• 🌍 多国格式支持（专门优化马来西亚格式）\n"
         "• 🚨 精确重复检测警告\n"
         "• 📊 详细HTML格式报告\n"
-        "• 🔧 兼容性修复\n\n"
+        "• 🔧 单线程稳定运行\n\n"
         "💡 <b>使用方法</b>：\n"
         "直接发送包含电话号码的文本，系统会自动识别并分析\n\n"
         "🎛️ <b>控制命令</b>：\n"
         "/clear - 清除历史数据\n"
         "/status - 查看系统状态\n"
         "/help - 帮助信息\n\n"
-        "🔧 当前版本：v6.1 - 兼容修复版"
+        "🔧 当前版本：v6.2 - 单线程稳定版"
     )
     
     await update.message.reply_text(welcome_message, parse_mode=ParseMode.HTML)
@@ -355,13 +348,13 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         f"🔧 <b>系统状态</b>：\n"
         f"• 运行状态：{'✅ 正常' if is_running else '❌ 异常'}\n"
         f"• HTML渲染：✅ 已启用\n"
-        f"• 重复检测：✅ v6.1\n"
-        f"• 兼容性：✅ 修复完成\n\n"
+        f"• 重复检测：✅ v6.2\n"
+        f"• 单线程模式：✅ 稳定运行\n\n"
         f"🌍 <b>格式支持</b>：\n"
         f"• 马来西亚：✅ 完全支持\n"
         f"• 中国：✅ 支持\n"
         f"• 国际格式：✅ 支持\n\n"
-        f"版本：v6.1 - 兼容修复版"
+        f"版本：v6.2 - 单线程稳定版"
     )
     
     await update.message.reply_text(status_message, parse_mode=ParseMode.HTML)
@@ -473,130 +466,47 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
         except Exception as e:
             logger.error(f"Error sending error message: {e}")
 
-# Flask监控应用
-app = Flask(__name__)
-
-@app.route('/health', methods=['GET'])
-def health_check():
-    """健康检查端点"""
-    return jsonify({
-        'status': 'healthy',
-        'timestamp': datetime.now().isoformat(),
-        'version': 'v6.1',
-        'bot_running': is_running,
-        'uptime': time.time()
-    })
-
-@app.route('/stats', methods=['GET'])
-def get_stats():
-    """获取统计信息"""
-    total_users = len(user_data_storage)
-    total_phones = sum(len(data.get('phones', set())) for data in user_data_storage.values())
-    
-    return jsonify({
-        'total_users': total_users,
-        'total_phones': total_phones,
-        'version': 'v6.1',
-        'features': ['duplicate_detection', 'html_rendering', 'malaysia_support', 'compatibility_fix']
-    })
-
-@app.route('/', methods=['GET'])
-def index():
-    """主页"""
-    return render_template_string("""
-    <!DOCTYPE html>
-    <html>
-    <head>
-        <title>电话号码检测机器人 v6.1</title>
-        <style>
-            body { font-family: Arial, sans-serif; margin: 40px; }
-            .status { color: green; font-weight: bold; }
-            .version { color: blue; }
-        </style>
-    </head>
-    <body>
-        <h1>🤖 电话号码检测机器人</h1>
-        <p class="version">版本：v6.1 - 兼容修复版</p>
-        <p class="status">✅ 系统运行正常</p>
-        <p>🔧 特性：智能重复检测、HTML渲染、马来西亚格式支持、兼容性修复</p>
-        <p>📊 监控端点：</p>
-        <ul>
-            <li><a href="/health">/health</a> - 健康检查</li>
-            <li><a href="/stats">/stats</a> - 统计信息</li>
-        </ul>
-    </body>
-    </html>
-    """)
-
-def run_flask():
-    """运行Flask应用"""
+def main():
+    """主函数 - 单线程运行"""
     global is_running
-    is_running = True
-    app.run(host='0.0.0.0', port=PORT, debug=False, use_reloader=False)
-
-def run_bot():
-    """运行Telegram机器人"""
-    global bot_application
+    
+    if not TOKEN:
+        logger.error("BOT_TOKEN environment variable not set")
+        return
+    
+    logger.info("Starting Phone Number Detection Bot v6.2 - Single Thread Mode")
     
     try:
         # 创建应用
-        bot_application = Application.builder().token(TOKEN).build()
+        application = Application.builder().token(TOKEN).build()
         
         # 添加处理器
-        bot_application.add_handler(CommandHandler("start", start_command))
-        bot_application.add_handler(CommandHandler("clear", clear_command))
-        bot_application.add_handler(CommandHandler("status", status_command))
-        bot_application.add_handler(CommandHandler("help", help_command))
-        bot_application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+        application.add_handler(CommandHandler("start", start_command))
+        application.add_handler(CommandHandler("clear", clear_command))
+        application.add_handler(CommandHandler("status", status_command))
+        application.add_handler(CommandHandler("help", help_command))
+        application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
         
         # 添加错误处理器
-        bot_application.add_error_handler(error_handler)
+        application.add_error_handler(error_handler)
         
-        # 启动机器人 - 使用兼容的参数
-        logger.info("Starting Telegram Bot v6.1...")
-        bot_application.run_polling(
+        # 设置运行状态
+        is_running = True
+        
+        # 启动机器人 - 在主线程中运行
+        logger.info("Starting Telegram Bot v6.2 in main thread...")
+        application.run_polling(
             poll_interval=1.0,
             timeout=20,
             bootstrap_retries=3,
             drop_pending_updates=True
         )
         
-    except Exception as e:
-        logger.error(f"Bot error: {e}")
-        time.sleep(5)
-
-def main():
-    """主函数"""
-    global flask_thread, bot_thread
-    
-    if not TOKEN:
-        logger.error("BOT_TOKEN environment variable not set")
-        return
-    
-    logger.info("Starting Phone Number Detection Bot v6.1 - Compatibility Fix")
-    
-    try:
-        # 启动Flask监控服务
-        flask_thread = threading.Thread(target=run_flask, daemon=True)
-        flask_thread.start()
-        logger.info(f"Flask monitoring service started on port {PORT}")
-        
-        # 启动机器人
-        bot_thread = threading.Thread(target=run_bot, daemon=True)
-        bot_thread.start()
-        logger.info("Telegram bot started")
-        
-        # 保持主线程运行
-        while not shutdown_event.is_set():
-            time.sleep(1)
-            
     except KeyboardInterrupt:
         logger.info("Received shutdown signal")
     except Exception as e:
-        logger.error(f"Main error: {e}")
+        logger.error(f"Bot error: {e}")
     finally:
-        shutdown_event.set()
-        global is_running
         is_running = False
         logger.info("Bot shutdown complete")
 
