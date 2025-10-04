@@ -6,30 +6,32 @@ import time
 import sys
 import traceback
 import asyncio
+import signal
 from datetime import datetime, timezone
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 from flask import Flask
 
-# 配置日志，减少第三方库的噪音
+# 配置日志，增强调试信息
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 
-# 设置第三方库日志级别为WARNING，减少控制台噪音
+# 设置第三方库日志级别
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("werkzeug").setLevel(logging.WARNING)
 logging.getLogger("telegram").setLevel(logging.WARNING)
 
 logger = logging.getLogger(__name__)
 
-# 从环境变量获取Bot Token - 兼容两种变量名
+# 从环境变量获取Bot Token
 BOT_TOKEN = os.getenv('BOT_TOKEN') or os.getenv('TELEGRAM_BOT_TOKEN', 'YOUR_BOT_TOKEN_HERE')
 
-# 全局重启计数器
+# 全局重启计数器和状态
 restart_count = 0
 start_time = datetime.now(timezone.utc)
+is_shutting_down = False
 
 # 国家代码到国旗的映射
 COUNTRY_FLAGS = {
@@ -81,20 +83,16 @@ def normalize_phone(phone):
 
 def get_country_code(phone):
     """获取电话号码的国家代码"""
-    # 移除所有非数字字符
     clean_phone = normalize_phone(phone)
     
-    # 如果号码以+开头，我们认为它包含国家代码
     if phone.strip().startswith('+'):
         clean_phone = clean_phone
     else:
-        # 对于没有+的号码，如果是11位数且以1开头，我们假设是中国号码
         if len(clean_phone) == 11 and clean_phone.startswith('1'):
             return '86'  # 中国
         elif len(clean_phone) == 10 and clean_phone.startswith(('2', '3', '4', '5', '6', '7', '8', '9')):
             return '1'   # 美国/加拿大
     
-    # 尝试匹配已知的国家代码（从最长的开始）
     for code_length in [4, 3, 2, 1]:
         if len(clean_phone) >= code_length:
             country_code = clean_phone[:code_length]
@@ -419,91 +417,169 @@ def run_flask():
         logger.error(f"Flask服务器启动失败: {e}")
 
 def create_application():
-    """创建新的Telegram应用实例 - 修复事件循环问题"""
-    # 创建应用
-    application = Application.builder().token(BOT_TOKEN).build()
-    
-    # 添加处理器
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("help", help_command))
-    application.add_handler(CommandHandler("stats", stats))
-    application.add_handler(CommandHandler("clear", clear_database))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, check_phone_duplicate))
-    
-    return application
-
-def run_bot():
-    """运行机器人主程序 - 修复事件循环问题"""
+    """创建新的Telegram应用实例"""
     try:
-        # 创建新的事件循环 - 关键修复！
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
+        logger.info("开始创建应用程序...")
         
-        logger.info("开始创建Telegram应用...")
+        # 创建应用 - 增加超时设置
+        application = Application.builder().token(BOT_TOKEN).connect_timeout(30).read_timeout(30).write_timeout(30).build()
         
-        # 创建新的应用实例
-        application = create_application()
+        # 添加处理器
+        application.add_handler(CommandHandler("start", start))
+        application.add_handler(CommandHandler("help", help_command))
+        application.add_handler(CommandHandler("stats", stats))
+        application.add_handler(CommandHandler("clear", clear_database))
+        application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, check_phone_duplicate))
         
-        logger.info(f"电话号码查重机器人 v9.5 启动成功！重启次数: {restart_count}")
-        
-        # 启动机器人 - 使用简单的参数
-        logger.info("开始运行轮询...")
-        application.run_polling(
-            drop_pending_updates=True,  # 丢弃待处理的更新
-            close_loop=False  # 不要自动关闭事件循环
-        )
-        
-        logger.warning("application.run_polling() 意外退出")
+        logger.info("应用程序创建成功，处理器已注册")
+        return application
         
     except Exception as e:
-        logger.error(f"Bot运行出错: {e}")
-        logger.error(f"Bot错误详情: {traceback.format_exc()}")
+        logger.error(f"创建应用程序失败: {e}")
+        logger.error(f"详细错误: {traceback.format_exc()}")
+        raise e
+
+def setup_signal_handlers():
+    """设置信号处理器"""
+    def signal_handler(signum, frame):
+        global is_shutting_down
+        logger.info(f"收到信号 {signum}，准备优雅关闭...")
+        is_shutting_down = True
+    
+    signal.signal(signal.SIGTERM, signal_handler)
+    signal.signal(signal.SIGINT, signal_handler)
+
+async def run_bot():
+    """运行机器人主程序 - 增强版"""
+    global is_shutting_down
+    
+    try:
+        logger.info("🔄 创建新的事件循环...")
+        
+        # 🔑 关键修复：创建新的事件循环
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        logger.info("✅ 新事件循环已设置")
+        
+        # 创建应用程序
+        application = create_application()
+        logger.info(f"🎯 电话号码查重机器人 v9.5 启动成功！重启次数: {restart_count}")
+        
+        # 添加心跳日志
+        async def heartbeat():
+            count = 0
+            while not is_shutting_down:
+                await asyncio.sleep(300)  # 每5分钟打印一次心跳
+                count += 1
+                logger.info(f"💓 心跳检查 #{count} - 机器人运行正常")
+        
+        # 启动心跳任务
+        heartbeat_task = asyncio.create_task(heartbeat())
+        
+        try:
+            logger.info("🚀 开始运行轮询...")
+            
+            # 启动轮询 - 增加更多配置
+            await application.initialize()
+            await application.start()
+            
+            logger.info("✅ 轮询已启动，机器人正在监听消息...")
+            
+            # 使用update receiver而不是run_polling
+            await application.updater.start_polling(
+                drop_pending_updates=True,
+                timeout=30,
+                bootstrap_retries=3
+            )
+            
+            # 等待直到需要停止
+            while not is_shutting_down:
+                await asyncio.sleep(1)
+                
+        except Exception as e:
+            logger.error(f"轮询过程中出错: {e}")
+            logger.error(f"详细错误: {traceback.format_exc()}")
+            raise e
+        finally:
+            # 清理资源
+            heartbeat_task.cancel()
+            try:
+                await application.updater.stop()
+                await application.stop()
+                await application.shutdown()
+                logger.info("✅ 应用程序已优雅关闭")
+            except Exception as e:
+                logger.error(f"关闭应用程序时出错: {e}")
+        
+    except Exception as e:
+        logger.error(f"🚨 Bot运行出错: {e}")
+        logger.error(f"详细错误: {traceback.format_exc()}")
         raise e
 
 def main():
-    """主函数 - 带自动重启功能"""
-    global restart_count
+    """主函数 - 增强重启机制"""
+    global restart_count, is_shutting_down
     
     logger.info("=== 电话号码查重机器人 v9.5 启动 ===")
     logger.info(f"启动时间: {format_datetime(start_time)}")
     
+    # 设置信号处理器
+    setup_signal_handlers()
+    
     # 启动Flask服务器
-    logger.info(f"Flask服务器启动，端口: {os.environ.get('PORT', 10000)}")
+    port = int(os.environ.get('PORT', 10000))
+    logger.info(f"Flask服务器启动，端口: {port}")
     flask_thread = threading.Thread(target=run_flask, daemon=True)
     flask_thread.start()
     logger.info("Flask服务器线程已启动")
     
-    # 自动重启循环
-    max_restarts = 10  # 最大重启次数
-    base_delay = 5     # 基础延迟（秒）
+    # 自动重启循环 - 增强版
+    max_restarts = 20      # 增加最大重启次数
+    base_delay = 3         # 减少基础延迟
+    consecutive_failures = 0
     
-    while restart_count < max_restarts:
+    while restart_count < max_restarts and not is_shutting_down:
         try:
             restart_count += 1
             logger.info(f"=== 第 {restart_count} 次启动机器人 ===")
             
-            run_bot()
+            # 运行机器人
+            asyncio.run(run_bot())
+            
+            # 如果到达这里说明正常退出
+            logger.warning("机器人正常退出")
+            consecutive_failures = 0  # 重置连续失败计数
             
         except KeyboardInterrupt:
-            logger.info("收到键盘中断，程序正常退出")
+            logger.info("🛑 收到键盘中断，程序正常退出")
+            is_shutting_down = True
             break
             
         except Exception as e:
+            consecutive_failures += 1
             logger.error(f"=== Bot异常停止 （第{restart_count}次） ===")
             logger.error(f"异常类型: {type(e).__name__}")
             logger.error(f"异常信息: {e}")
-            logger.error(f"异常详情：{traceback.format_exc()}")
+            logger.error(f"连续失败: {consecutive_failures} 次")
             
             if restart_count >= max_restarts:
                 logger.error(f"已达到最大重启次数 ({max_restarts})，程序退出")
                 break
             
-            # 指数退避延迟
-            delay = min(base_delay * (2 ** (restart_count - 1)), 300)  # 最多5分钟
-            logger.info(f"等待 {delay} 秒后重启...")
+            if consecutive_failures >= 5:
+                logger.error("连续失败次数过多，程序退出")
+                break
+            
+            # 动态延迟 - 连续失败时延迟更长
+            if consecutive_failures <= 2:
+                delay = base_delay
+            else:
+                delay = min(base_delay * (2 ** (consecutive_failures - 1)), 60)  # 最多1分钟
+            
+            logger.info(f"⏱️ 等待 {delay} 秒后重启...")
             time.sleep(delay)
     
-    logger.info("程序已退出")
+    logger.info("🏁 程序已退出")
 
 if __name__ == "__main__":
     main()
