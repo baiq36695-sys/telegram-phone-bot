@@ -137,7 +137,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uptime = calculate_uptime()
     
     welcome_message = f"""
-🎉 **电话号码查重机器人 v9.2** 🎉
+🎉 **电话号码查重机器人 v9.3** 🎉
 ═══════════════════════════
 
 👋 欢迎，{level_emoji} **{user.full_name}**！
@@ -154,14 +154,13 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 📱 **使用方法：**
 直接发送电话号码给我，我会帮您检查是否重复！
 
-✨ **系统状态：**
+✨ **运行状态：**
 • ⏰ 运行时间：{uptime}
 • 🔄 重启次数：{restart_count}
 
 **命令列表：**
 • `/stats` - 查看详细统计
 • `/clear` - 清空数据库
-• `/system` - 查看系统状态
 
 ═══════════════════════════
 🚀 开始发送电话号码吧！
@@ -325,53 +324,16 @@ async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 {country_text}
 
-⚙️ **系统状态：**
+⚙️ **运行状态：**
 • ⏰ 运行时间：{uptime}
 • 🔄 重启次数：{restart_count}
 • 📅 启动时间：{format_datetime(start_time)}
 
 ═══════════════════════════
 💡 使用 `/clear` 清空数据库
-🔧 使用 `/system` 查看系统详情
 """
     
     await update.message.reply_text(stats_message, parse_mode='Markdown')
-
-async def system_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """显示系统状态"""
-    uptime = calculate_uptime()
-    
-    # 内存和性能信息
-    import psutil
-    memory_info = psutil.virtual_memory()
-    cpu_percent = psutil.cpu_percent(interval=1)
-    
-    system_message = f"""
-🔧 **系统状态监控** 🔧
-═══════════════════════════
-
-⚙️ **运行状态：**
-• 🟢 状态：运行正常
-• ⏰ 运行时间：{uptime}
-• 🔄 重启次数：{restart_count}
-• 📅 启动时间：{format_datetime(start_time)}
-
-💻 **系统资源：**
-• 🧠 CPU使用率：{cpu_percent}%
-• 💾 内存使用：{memory_info.percent}%
-• 💾 可用内存：{memory_info.available // (1024*1024)} MB
-
-🤖 **机器人信息：**
-• 📱 版本：v9.2 稳定版
-• 🔄 自动重启：已启用
-• 📊 统计功能：已启用
-• 🛡️ 异常保护：已启用
-
-═══════════════════════════
-✅ 所有系统正常运行中！
-"""
-    
-    await update.message.reply_text(system_message, parse_mode='Markdown')
 
 async def clear_database(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """清空数据库"""
@@ -400,13 +362,13 @@ def run_flask():
     @app.route('/')
     def health_check():
         uptime = calculate_uptime()
-        return f"Phone Bot v9.2 is alive! 🚀<br>Uptime: {uptime}<br>Restarts: {restart_count}", 200
+        return f"Phone Bot v9.3 is alive! 🚀<br>Uptime: {uptime}<br>Restarts: {restart_count}", 200
     
     @app.route('/status')
     def status():
         return {
             "status": "running",
-            "version": "9.2",
+            "version": "9.3",
             "uptime": calculate_uptime(),
             "restart_count": restart_count,
             "start_time": start_time.isoformat(),
@@ -429,11 +391,10 @@ def run_bot():
         # 添加处理器
         application.add_handler(CommandHandler("start", start))
         application.add_handler(CommandHandler("stats", stats))
-        application.add_handler(CommandHandler("system", system_status))
         application.add_handler(CommandHandler("clear", clear_database))
         application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, check_phone_duplicate))
         
-        logger.info(f"电话号码查重机器人 v9.2 启动成功！重启次数: {restart_count}")
+        logger.info(f"电话号码查重机器人 v9.3 启动成功！重启次数: {restart_count}")
         
         # 启动机器人
         application.run_polling()
