@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-终极修复版本 - 解决重启后停止响应问题
-针对高级诊断发现的所有严重问题进行修复
+完整功能版本 v9.6 - 保留v9.5所有功能 + v9.6修复
+结合v9.5的完整功能和v9.6的关键修复
 """
 
 import os
@@ -25,7 +25,7 @@ nest_asyncio.apply()
 
 # 配置日志 - 使用INFO级别，避免DEBUG性能问题
 logging.basicConfig(
-    level=logging.INFO,  # 改为INFO级别
+    level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 
@@ -44,7 +44,6 @@ if not BOT_TOKEN:
     sys.exit(1)
 
 # 全局重启计数器和状态 - 添加线程锁
-import threading
 state_lock = threading.Lock()  # 解决竞态条件
 
 restart_count = 0
@@ -52,63 +51,121 @@ start_time = datetime.now(timezone.utc)
 is_shutting_down = False
 received_sigterm = False
 
-# 国家代码到国旗的映射
+# 完整的国家代码到国旗的映射（v9.5版本）
 COUNTRY_FLAGS = {
     '1': '🇺🇸',     # 美国/加拿大
     '44': '🇬🇧',    # 英国
+    '33': '🇫🇷',    # 法国
+    '49': '🇩🇪',    # 德国
+    '39': '🇮🇹',    # 意大利
+    '34': '🇪🇸',    # 西班牙
+    '7': '🇷🇺',     # 俄罗斯
+    '81': '🇯🇵',    # 日本
+    '82': '🇰🇷',    # 韩国
     '86': '🇨🇳',    # 中国
     '852': '🇭🇰',   # 香港
     '853': '🇲🇴',   # 澳门
     '886': '🇹🇼',   # 台湾
+    '65': '🇸🇬',    # 新加坡
+    '60': '🇲🇾',    # 马来西亚
+    '66': '🇹🇭',    # 泰国
+    '91': '🇮🇳',    # 印度
+    '55': '🇧🇷',    # 巴西
+    '52': '🇲🇽',    # 墨西哥
+    '61': '🇦🇺',    # 澳大利亚
+    '64': '🇳🇿',    # 新西兰
+    '90': '🇹🇷',    # 土耳其
+    '98': '🇮🇷',    # 伊朗
+    '966': '🇸🇦',   # 沙特阿拉伯
+    '971': '🇦🇪',   # 阿联酋
+    '92': '🇵🇰',    # 巴基斯坦
+    '880': '🇧🇩',   # 孟加拉国
+    '94': '🇱🇰',    # 斯里兰卡
+    '95': '🇲🇲',    # 缅甸
+    '84': '🇻🇳',    # 越南
+    '62': '🇮🇩',    # 印度尼西亚
+    '63': '🇵🇭',    # 菲律宾
+    '20': '🇪🇬',    # 埃及
+    '27': '🇿🇦',    # 南非
+    '234': '🇳🇬',   # 尼日利亚
+    '254': '🇰🇪',   # 肯尼亚
+    '256': '🇺🇬',   # 乌干达
+    '233': '🇬🇭',   # 加纳
+    '213': '🇩🇿',   # 阿尔及利亚
+    '212': '🇲🇦'    # 摩洛哥
 }
 
-def format_datetime(dt):
-    """格式化日期时间"""
-    return dt.strftime('%Y-%m-%d %H:%M:%S')
+def normalize_phone(phone):
+    """规范化电话号码，去除所有非数字字符"""
+    return re.sub(r'\D', '', phone)
 
-# 电话号码解析函数
-def parse_phone_number(text):
-    """解析电话号码"""
-    # 移除所有非数字字符
-    digits_only = re.sub(r'[^\d]', '', text)
+def get_country_code(phone):
+    """获取电话号码的国家代码"""
+    clean_phone = normalize_phone(phone)
     
-    if not digits_only:
-        return None
+    if phone.strip().startswith('+'):
+        clean_phone = clean_phone
+    else:
+        if len(clean_phone) == 11 and clean_phone.startswith('1'):
+            return '86'  # 中国
+        elif len(clean_phone) == 10 and clean_phone.startswith(('2', '3', '4', '5', '6', '7', '8', '9')):
+            return '1'   # 美国/加拿大
     
-    # 处理各种格式
-    if digits_only.startswith('86'):
-        digits_only = digits_only[2:]
-    elif digits_only.startswith('+86'):
-        digits_only = digits_only[3:]
+    for code_length in [4, 3, 2, 1]:
+        if len(clean_phone) >= code_length:
+            country_code = clean_phone[:code_length]
+            if country_code in COUNTRY_FLAGS:
+                return country_code
     
-    if len(digits_only) == 11 and digits_only.startswith('1'):
-        return digits_only
-    
-    return None
-
-def format_phone_display(phone):
-    """格式化电话号码显示"""
-    if len(phone) == 11:
-        return f"{phone[:3]} {phone[3:7]} {phone[7:]}"
-    return phone
+    return 'Unknown'
 
 def get_country_flag(phone):
-    """获取国家国旗"""
-    if phone.startswith('1') and len(phone) == 11:
-        return '🇨🇳'
-    return '🌍'
+    """获取电话号码对应的国家国旗"""
+    country_code = get_country_code(phone)
+    return COUNTRY_FLAGS.get(country_code, '🌐')
+
+def format_datetime(dt):
+    """格式化日期时间为易读格式"""
+    return dt.strftime('%Y-%m-%d %H:%M:%S')
+
+def get_user_level_emoji(user_id):
+    """根据用户ID生成等级表情"""
+    levels = ['👤', '⭐', '🌟', '💎', '👑', '🔥', '⚡', '🚀']
+    return levels[user_id % len(levels)]
+
+def calculate_uptime():
+    """计算运行时间"""
+    current_time = datetime.now(timezone.utc)
+    uptime = current_time - start_time
+    
+    days = uptime.days
+    hours, remainder = divmod(uptime.seconds, 3600)
+    minutes, seconds = divmod(remainder, 60)
+    
+    if days > 0:
+        return f"{days}天 {hours}小时 {minutes}分钟"
+    elif hours > 0:
+        return f"{hours}小时 {minutes}分钟"
+    else:
+        return f"{minutes}分钟 {seconds}秒"
 
 # Flask应用
 flask_app = Flask(__name__)
 
 @flask_app.route('/')
 def health_check():
+    uptime = calculate_uptime()
+    return f"Phone Bot v9.6 (完整功能版) is alive! 🚀<br>Uptime: {uptime}<br>Restarts: {restart_count}", 200
+
+@flask_app.route('/status')
+def status():
     uptime = datetime.now(timezone.utc) - start_time
     return {
         'status': 'ok',
         'uptime_seconds': int(uptime.total_seconds()),
         'restart_count': restart_count,
-        'version': 'v9.6-ultimate-fix'
+        'version': 'v9.6-完整功能版',
+        'uptime_text': calculate_uptime()
     }
 
 def run_flask():
@@ -118,98 +175,259 @@ def run_flask():
 
 # 机器人命令处理
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """处理/start命令"""
-    logger.info(f"收到/start命令，用户: {update.effective_user.id}")
+    """开始命令处理"""
+    user = update.effective_user
+    level_emoji = get_user_level_emoji(user.id)
+    uptime = calculate_uptime()
     
-    welcome_text = f"""
-🎯 **电话号码查重机器人 v9.6** (终极修复版)
+    welcome_message = f"""
+🎉 **电话号码查重机器人 v9.6** 🎉
+═══════════════════════════
 
-👋 欢迎使用！请发送电话号码进行查重。
+👋 欢迎，{level_emoji} **{user.full_name}**！
 
-📱 **支持格式:**
-• 13812345678
-• 138 1234 5678  
-• +86 138 1234 5678
-• 86-138-1234-5678
+🔍 **功能特点：**
+• 智能去重检测
+• 实时时间显示  
+• 用户追踪系统
+• 重复次数统计
+• 国家识别标识
+• 📊 完整统计功能
+• 🔄 稳定自动重启
+• 🛡️ 终极修复版本
 
-🔧 **系统信息:**
-• 重启次数: {restart_count}
-• 启动时间: {format_datetime(start_time)}
-• 状态: ✅ 运行正常
+📱 **使用方法：**
+直接发送电话号码给我，我会帮您检查是否重复！
 
-📋 **可用命令:**
-/start - 显示此帮助
-/status - 查看状态
+✨ **运行状态：**
+• ⏰ 运行时间：{uptime}
+• 🔄 重启次数：{restart_count}
+
+**命令列表：**
+• `/help` - 快速帮助
+• `/stats` - 查看详细统计
+• `/clear` - 清空数据库
+
+═══════════════════════════
+🚀 开始发送电话号码吧！
 """
     
-    await update.message.reply_text(welcome_text, parse_mode='Markdown')
+    await update.message.reply_text(welcome_message, parse_mode='Markdown')
 
-async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """处理/status命令"""
-    logger.info(f"收到/status命令，用户: {update.effective_user.id}")
-    
-    uptime = datetime.now(timezone.utc) - start_time
-    
-    status_text = f"""
-📊 **机器人状态报告**
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """帮助命令处理"""
+    help_message = f"""
+🆘 **快速帮助** - v9.6
+═══════════════════════════
 
-🕐 **运行时间:** {uptime.days}天 {uptime.seconds//3600}小时 {(uptime.seconds%3600)//60}分钟
-🔄 **重启次数:** {restart_count}
-🏃 **当前状态:** {'🔄 重启中' if received_sigterm else '✅ 运行中'}
-🌐 **网络状态:** ✅ 连接正常
-💾 **内存状态:** ✅ 正常
+📋 **可用命令：**
+• `/start` - 完整功能介绍
+• `/help` - 快速帮助（本页面）
+• `/stats` - 详细统计信息
+• `/clear` - 清空数据库
 
-🔧 **技术信息:**
-• 版本: v9.6 终极修复版
-• 进程ID: {os.getpid()}
+📱 **使用方法：**
+直接发送电话号码给我即可自动检测！
+
+⭐ **新功能：**
+• 🔄 自动重启保护
+• ⏰ 实时时间戳显示  
+• 📊 完整统计系统
+• 🛡️ 终极修复版本
+
+═══════════════════════════
+💡 直接发送号码开始使用！
 """
     
-    await update.message.reply_text(status_text, parse_mode='Markdown')
+    await update.message.reply_text(help_message, parse_mode='Markdown')
 
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """处理普通消息"""
-    user_id = update.effective_user.id
-    message_text = update.message.text
-    
-    logger.info(f"收到消息，用户: {user_id}，内容: {message_text[:50]}...")
-    
-    # 解析电话号码
-    phone_number = parse_phone_number(message_text)
-    
-    if not phone_number:
-        error_text = f"""
-❌ **未识别到有效电话号码**
+async def check_phone_duplicate(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """检查电话号码是否重复"""
+    try:
+        message_text = update.message.text.strip()
+        user = update.effective_user
+        current_time = datetime.now(timezone.utc)
+        
+        # 检查消息是否包含电话号码
+        phone_pattern = r'[\+]?[\d\s\-\(\)]{8,}'
+        phone_matches = re.findall(phone_pattern, message_text)
+        
+        if not phone_matches:
+            return
+        
+        # 初始化聊天数据
+        if 'phone_database' not in context.chat_data:
+            context.chat_data['phone_database'] = {}
+        
+        phone_database = context.chat_data['phone_database']
+        user_level = get_user_level_emoji(user.id)
+        
+        for phone_match in phone_matches:
+            phone_match = phone_match.strip()
+            normalized_phone = normalize_phone(phone_match)
+            
+            # 检查是否为有效电话号码
+            if len(normalized_phone) < 8:
+                continue
+            
+            country_flag = get_country_flag(phone_match)
+            
+            if normalized_phone in phone_database:
+                # 发现重复号码
+                phone_info = phone_database[normalized_phone]
+                phone_info['count'] += 1
+                
+                # 记录重复用户信息
+                if 'duplicate_users' not in phone_info:
+                    phone_info['duplicate_users'] = []
+                
+                duplicate_info = {
+                    'user_id': user.id,
+                    'user_name': user.full_name,
+                    'detection_time': current_time,
+                    'original_number': phone_match
+                }
+                phone_info['duplicate_users'].append(duplicate_info)
+                
+                # 构建回复消息
+                first_user_level = get_user_level_emoji(phone_info['first_user_info']['id'])
+                
+                duplicate_message = f"""
+🚨 **发现重复号码！** 🚨
+═══════════════════════════
 
-📝 您发送的内容: `{message_text}`
+{country_flag} **号码：** `{phone_match}`
 
-📱 **请使用以下格式:**
-• 13812345678
-• 138 1234 5678
-• +86 138 1234 5678
-• 86-138-1234-5678
+📅 **首次添加：** {format_datetime(phone_info['first_seen_time'])}
+👤 **首次用户：** {first_user_level} {phone_info['first_user_info']['name']}
+
+⏰ **当前检测：** {format_datetime(current_time)}
+👤 **当前用户：** {user_level} {user.full_name}
+
+📊 **统计信息：**
+🔢 总重复次数：**{phone_info['count']}** 次
+👥 涉及用户：**{len(set([phone_info['first_user_info']['id']] + [dup['user_id'] for dup in phone_info['duplicate_users']]))}** 人
+
+═══════════════════════════
+⚠️ 请注意：此号码已被使用过！
 """
-        await update.message.reply_text(error_text, parse_mode='Markdown')
+                
+                await update.message.reply_text(duplicate_message, parse_mode='Markdown')
+                
+            else:
+                # 首次添加号码
+                phone_database[normalized_phone] = {
+                    'first_seen_time': current_time,
+                    'first_user_info': {
+                        'id': user.id,
+                        'name': user.full_name
+                    },
+                    'count': 1,
+                    'original_number': phone_match,
+                    'duplicate_users': []
+                }
+                
+                success_message = f"""
+✅ **号码已记录！** ✅
+═══════════════════════════
+
+{country_flag} **号码：** `{phone_match}`
+
+📅 **添加时间：** {format_datetime(current_time)}
+👤 **添加用户：** {user_level} {user.full_name}
+
+🎯 **状态：** 首次添加，无重复！
+
+═══════════════════════════
+✨ 号码已成功加入数据库！
+"""
+                
+                await update.message.reply_text(success_message, parse_mode='Markdown')
+        
+    except Exception as e:
+        logger.error(f"处理消息时出错: {e}")
+        logger.error(f"错误详情: {traceback.format_exc()}")
+        await update.message.reply_text(
+            "❌ 处理消息时出现错误，请稍后重试。",
+            parse_mode='Markdown'
+        )
+
+async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """显示详细统计信息"""
+    if 'phone_database' not in context.chat_data:
+        await update.message.reply_text("📊 暂无数据记录。")
         return
     
-    # 格式化显示
-    country_flag = get_country_flag(phone_number)
-    formatted_display = format_phone_display(phone_number)
+    phone_database = context.chat_data['phone_database']
+    total_numbers = len(phone_database)
+    total_duplicates = sum(1 for info in phone_database.values() if info['count'] > 1)
+    unique_numbers = total_numbers - total_duplicates
     
-    result_text = f"""
-✅ **电话号码解析成功**
+    # 统计国家分布
+    country_stats = {}
+    for info in phone_database.values():
+        country_code = get_country_code(info['original_number'])
+        country_flag = get_country_flag(info['original_number'])
+        country_key = f"{country_flag} {country_code}"
+        country_stats[country_key] = country_stats.get(country_key, 0) + 1
+    
+    # 按数量排序
+    sorted_countries = sorted(country_stats.items(), key=lambda x: x[1], reverse=True)
+    top_countries = sorted_countries[:5]  # 显示前5名
+    
+    country_text = ""
+    if top_countries:
+        country_text = "\n🌍 **国家分布（Top 5）：**\n"
+        for country, count in top_countries:
+            country_text += f"• {country}: {count} 个号码\n"
+    
+    # 计算总重复次数
+    total_repeat_count = sum(info['count'] for info in phone_database.values())
+    
+    uptime = calculate_uptime()
+    
+    stats_message = f"""
+📊 **数据库完整统计** 📊
+═══════════════════════════
 
-📱 **原始输入:** `{message_text}`
-🎯 **解析结果:** {country_flag} `{formatted_display}`
-🔢 **标准格式:** `{phone_number}`
+📱 **号码统计：**
+• 总记录数：**{total_numbers}** 个
+• 重复号码：**{total_duplicates}** 个
+• 唯一号码：**{unique_numbers}** 个
+• 总重复次数：**{total_repeat_count}** 次
 
-📊 **号码信息:**
-• 国家/地区: {country_flag} 中国大陆  
-• 号码长度: {len(phone_number)} 位
+{country_text}
 
-💾 **已保存到数据库进行查重分析**
+⚙️ **运行状态：**
+• ⏰ 运行时间：{uptime}
+• 🔄 重启次数：{restart_count}
+• 📅 启动时间：{format_datetime(start_time)}
+
+═══════════════════════════
+💡 使用 `/clear` 清空数据库
 """
     
-    await update.message.reply_text(result_text, parse_mode='Markdown')
+    await update.message.reply_text(stats_message, parse_mode='Markdown')
+
+async def clear_database(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """清空数据库"""
+    old_count = len(context.chat_data.get('phone_database', {}))
+    context.chat_data['phone_database'] = {}
+    
+    clear_message = f"""
+🗑️ **数据库已清空！** 🗑️
+═══════════════════════════
+
+📊 **清理统计：**
+• 已删除：**{old_count}** 条记录
+• 当前状态：数据库为空
+• 清理时间：{format_datetime(datetime.now(timezone.utc))}
+
+═══════════════════════════
+✨ 可以重新开始记录号码了！
+"""
+    
+    await update.message.reply_text(clear_message, parse_mode='Markdown')
 
 # 错误处理回调 - 解决静默失败问题
 async def error_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -246,10 +464,12 @@ def create_application():
             .build()
         )
         
-        # 注册处理器
+        # 注册所有处理器
         application.add_handler(CommandHandler("start", start_command))
-        application.add_handler(CommandHandler("status", status_command))
-        application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+        application.add_handler(CommandHandler("help", help_command))
+        application.add_handler(CommandHandler("stats", stats_command))
+        application.add_handler(CommandHandler("clear", clear_database))
+        application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, check_phone_duplicate))
         
         # 添加错误处理器 - 关键修复
         application.add_error_handler(error_callback)
@@ -324,7 +544,6 @@ async def run_bot():
             drop_pending_updates=True,    # 丢弃待处理更新
             timeout=30,                   # 轮询超时
             bootstrap_retries=3,          # 重试次数
-            # 移除error_callback参数，因为我们已经用add_error_handler了
         )
         
         logger.info("✅ 轮询已启动，机器人正在监听消息...")
@@ -384,7 +603,7 @@ def main():
     """主函数 - 终极修复版"""
     global restart_count, is_shutting_down, received_sigterm
     
-    logger.info("=== 电话号码查重机器人 v9.6 启动 (终极修复版) ===")
+    logger.info("=== 电话号码查重机器人 v9.6 启动 (完整功能版) ===")
     logger.info(f"启动时间: {format_datetime(start_time)}")
     
     # 设置信号处理器
