@@ -4,6 +4,7 @@
 兼容最新版本的python-telegram-bot
 包含完整的HTML格式化报告，重复号码显示红色警告
 集成自动重启功能，确保服务持续运行
+修复重复检测逻辑：确保只有数字完全相同的号码才被标记为重复
 """
 
 import os
@@ -117,13 +118,37 @@ def extract_phone_numbers(text: str) -> Set[str]:
     ]
     
     phone_numbers = set()
+    all_matches = []
     
+    # 首先收集所有匹配项及其位置
     for pattern in patterns:
-        matches = re.findall(pattern, text, re.IGNORECASE)
-        for match in matches:
-            # 清理电话号码：移除多余空格，但保留格式
-            cleaned = re.sub(r'\s+', ' ', match.strip())
-            phone_numbers.add(cleaned)
+        for match in re.finditer(pattern, text, re.IGNORECASE):
+            all_matches.append((match.start(), match.end(), match.group()))
+    
+    # 按位置排序，避免重叠匹配
+    all_matches.sort()
+    
+    # 过滤重叠的匹配
+    filtered_matches = []
+    for start, end, match_text in all_matches:
+        # 检查是否与之前的匹配重叠
+        overlap = False
+        for prev_start, prev_end, _ in filtered_matches:
+            if start < prev_end and end > prev_start:  # 有重叠
+                overlap = True
+                break
+        
+        if not overlap:
+            filtered_matches.append((start, end, match_text))
+    
+    # 处理最终的匹配结果
+    for _, _, match_text in filtered_matches:
+        # 标准化电话号码格式：统一空格，保持结构
+        cleaned = re.sub(r'\s+', ' ', match_text.strip())
+        # 进一步标准化：移除多余的分隔符
+        normalized = re.sub(r'[-\s]+', ' ', cleaned)
+        normalized = re.sub(r'\s+', ' ', normalized).strip()
+        phone_numbers.add(normalized)
     
     return phone_numbers
 
@@ -274,54 +299,68 @@ def signal_handler(signum, frame):
     shutdown_event.set()
     is_running = False
     
-    # 尝试优雅关闭bot应用
     if bot_application:
         try:
-            logger.info("🛑 正在停止bot应用...")
+            bot_application.stop_running()
+            logger.info("Telegram 机器人已停止")
         except Exception as e:
-            logger.error(f"停止bot应用时出错: {e}")
+            logger.error(f"停止机器人时出错: {e}")
     
-    logger.info("🔄 准备自动重启...")
-    restart_application()
+    # 检查是否需要重启
+    if signum in [signal.SIGTERM, signal.SIGINT]:
+        logger.info("🔄 系统终止信号，准备自动重启...")
+        restart_application()
+    else:
+        sys.exit(0)
 
-# Flask路由 - 增加重启信息
-@app.route('/', methods=['GET', 'HEAD'])
+# 注册信号处理器
+signal.signal(signal.SIGTERM, signal_handler)
+signal.signal(signal.SIGINT, signal_handler)
+
+# Flask路由
+@app.route('/')
+def home():
+    """主页"""
+    global RESTART_COUNT, is_running
+    
+    status = {
+        'service': '电话号码检测机器人 HTML增强版',
+        'status': '✅ 运行中' if is_running else '❌ 停止',
+        'restart_count': f'{RESTART_COUNT}/{MAX_RESTARTS}',
+        'features': [
+            '✅ HTML格式化显示',
+            '✅ 红色重复号码警示',
+            '✅ 智能风险评估',
+            '✅ 自动重启保护',
+            '✅ 兼容性过滤器',
+            '✅ 修复重复检测逻辑'
+        ],
+        'timestamp': datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    }
+    
+    return jsonify(status)
+
+@app.route('/health')
 def health_check():
-    """健康检查端点"""
-    global is_running, RESTART_COUNT
+    """健康检查"""
     return jsonify({
-        'status': 'healthy',
-        'service': 'telegram-phone-bot-html-red-warning-v2',
-        'bot_running': is_running,
+        'status': 'healthy' if is_running else 'unhealthy',
+        'timestamp': datetime.datetime.now().isoformat(),
         'restart_count': RESTART_COUNT,
-        'max_restarts': MAX_RESTARTS,
-        'auto_restart': 'enabled',
-        'html_format': 'enabled',
-        'red_warning': 'enabled',
-        'compatible_filters': 'enabled',
-        'features': ['html_format', 'red_duplicate_warning', 'auto_restart', 'compatible_filters'],
-        'timestamp': time.time()
-    })
-
-@app.route('/status')
-def status():
-    """状态端点"""
-    global is_running
-    return jsonify({
-        'bot_status': 'running' if is_running else 'stopped',
-        'groups_monitored': len(user_groups),
-        'total_phone_numbers': sum(len(data['phones']) for data in user_groups.values()),
-        'restart_count': RESTART_COUNT,
-        'auto_restart_enabled': True,
-        'html_format_enabled': True,
-        'red_warning_enabled': True,
-        'compatible_filters_enabled': True
+        'features_enabled': [
+            'html_formatting',
+            'red_duplicate_warning',
+            'risk_assessment',
+            'auto_restart',
+            'compatibility_filter',
+            'fixed_duplicate_detection'
+        ]
     })
 
 @app.route('/restart')
-def force_restart():
-    """强制重启机器人的端点"""
-    logger.info("🔄 收到强制重启请求")
+def restart_bot():
+    """手动重启机器人"""
+    logger.info("📱 通过HTTP请求重启机器人")
     restart_application()
     return jsonify({'message': 'Bot restart initiated', 'timestamp': datetime.datetime.now().isoformat()})
 
@@ -338,6 +377,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 ⭐ 多国电话号码格式支持
 ⭐ 智能风险评估系统
 ⭐ 自动重启保持运行
+⭐ <b>🔧 修复重复检测逻辑</b>
 
 <b>📱 支持的电话号码格式:</b>
 
@@ -366,6 +406,10 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 ✅ 系统故障自动修复
 ✅ 保持24/7持续运行
 ✅ 重启次数: {RESTART_COUNT}/{MAX_RESTARTS}
+
+<b>🔧 重复检测修复:</b>
+✅ 确保只有数字完全相同的号码才被标记为重复
+✅ 修复了不同号码被误判为重复的问题
 
 现在就发送包含电话号码的消息开始检测吧！🎯"""
     
@@ -461,10 +505,12 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 • 兼容过滤器: ✅ 已启用
 • 风险检测: ✅ 智能评估已启用
 • 自动重启保护: ✅ 已启用
+• 重复检测修复: ✅ 已修复
 
 ---
-🤖 电话号码检测机器人 HTML增强版 v4.1
-🔴 集成红色重复号码警示系统 + 兼容过滤器</pre>"""
+🤖 电话号码检测机器人 HTML增强版 v4.2
+🔴 集成红色重复号码警示系统 + 兼容过滤器
+🔧 修复重复检测逻辑</pre>"""
     
     await update.message.reply_text(stats_text, parse_mode='HTML')
 
@@ -488,18 +534,23 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 • 重复号码红色警示
 • 智能风险评估
 • 兼容性过滤器
+• 🔧 修复重复检测逻辑
 
 🔄 自动重启功能:
 • 重启次数: {RESTART_COUNT}/{MAX_RESTARTS}
 • ✅ 自动保持运行
 • ✅ 故障自动恢复
 
-💡 示例: 联系方式：+60 11-2896 2309</pre>"""
+💡 示例: 联系方式：+60 11-2896 2309
+
+🔧 重复检测说明:
+只有数字完全相同的号码才会被标记为重复
+例如：+60 11-2896 2309 和 +60 11-2896 2308 不是重复</pre>"""
     
     await update.message.reply_text(help_text, parse_mode='HTML')
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """处理包含电话号码的消息 - HTML格式 + 红色重复警示"""
+    """处理包含电话号码的消息 - HTML格式 + 红色重复警示 + 修复重复检测逻辑"""
     try:
         chat_id = update.effective_chat.id
         message_text = update.message.text
@@ -526,12 +577,39 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         # 检查重复和分类
         existing_phones = chat_data['phones']
-        new_phones = phone_numbers - existing_phones
-        duplicate_phones = phone_numbers & existing_phones
+        
+        # 🔧 修复重复检测逻辑：标准化后数字完全相同才算重复
+        duplicate_phones = set()
+        new_phones = set()
+        
+        for phone in phone_numbers:
+            # 标准化当前号码进行比较（只保留数字和+号）
+            current_normalized = re.sub(r'[^\d+]', '', phone)
+            
+            # 检查是否与已存在的号码重复
+            is_duplicate = False
+            for existing_phone in existing_phones:
+                # 标准化已存在的号码进行比较
+                existing_normalized = re.sub(r'[^\d+]', '', existing_phone)
+                
+                # 只有标准化后的数字完全相同才认为是重复
+                if current_normalized == existing_normalized:
+                    duplicate_phones.add(phone)
+                    is_duplicate = True
+                    break
+            
+            # 如果不是重复，则添加到新号码集合
+            if not is_duplicate:
+                new_phones.add(phone)
         
         # 构建HTML格式的完整报告
         now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        total_in_group = len(existing_phones) + len(new_phones)
+        
+        # 添加真正新的号码到现有集合中
+        for phone in new_phones:
+            existing_phones.add(phone)
+            
+        total_in_group = len(existing_phones)
         
         # 计算统计数据
         all_detected = phone_numbers
@@ -576,9 +654,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 report += f"<pre>{i:2d}. 📞 <code>{phone}</code>\n"
                 report += f"    📍 类型: {phone_type}\n"
                 report += f"    🛡️ 风险: {risk_emoji} {risk_level}</pre>\n"
-            
-            # 添加到记录中
-            existing_phones.update(new_phones)
         
         # 重复号码（红色警示显示）
         if duplicate_phones:
@@ -607,10 +682,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 • 红色警示: ✅ 已启用
 • 兼容过滤器: ✅ 已启用
 • 自动重启: ✅ 保护中
+• 重复检测修复: ✅ 已修复
 
 =====================================
-🤖 电话号码检测机器人 HTML增强版 v4.1
+🤖 电话号码检测机器人 HTML增强版 v4.2
 🔴 集成红色重复号码警示系统 + 兼容过滤器
+🔧 修复重复检测逻辑 - 确保精准判断
 ⏰ {now}</pre>"""
         
         # 发送完整的HTML格式报告
@@ -689,6 +766,7 @@ async def run_bot():
         logger.info("🔧 使用兼容性过滤器设置")
         logger.info("🔄 启用自动重启保护功能")
         logger.info("🔧 使用nest_asyncio解决事件循环冲突")
+        logger.info("🔧 重复检测逻辑已修复 - 确保精准判断")
         
         # 运行机器人
         await bot_application.run_polling(
@@ -705,86 +783,48 @@ async def run_bot():
         is_running = False
         logger.info("机器人已停止运行")
 
-def start_bot_thread():
-    """在新线程中启动机器人"""
-    global bot_thread, is_running
-    
-    def run_async_bot():
-        try:
-            # 创建新的事件循环
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            loop.run_until_complete(run_bot())
-        except Exception as e:
-            logger.error(f"机器人线程错误: {e}")
-        finally:
-            try:
-                loop.close()
-            except:
-                pass
-    
-    if bot_thread and bot_thread.is_alive():
-        logger.info("机器人线程已在运行")
-        return
-    
-    bot_thread = threading.Thread(target=run_async_bot, daemon=True)
-    bot_thread.start()
-    logger.info("🚀 机器人线程已启动")
-
-def start_flask_thread():
-    """启动Flask线程"""
-    global flask_thread
-    
-    if flask_thread and flask_thread.is_alive():
-        logger.info("Flask线程已在运行")
-        return
-    
-    flask_thread = threading.Thread(target=run_flask, daemon=True)
-    flask_thread.start()
-    logger.info("🌐 Flask线程已启动")
-
 def main():
-    """主函数"""
-    global RESTART_COUNT
-    
-    logger.info("=" * 70)
-    logger.info(f"📱 电话号码检测机器人 - 兼容版 + 红色警示 (重启次数: {RESTART_COUNT})")
-    logger.info("✅ HTML格式化显示：已启用")
-    logger.info("✅ 红色重复号码警示：已启用")
-    logger.info("✅ 兼容性过滤器：已启用")
-    logger.info("✅ 自动重启保护机制：已启用")
-    logger.info("✅ 通用聊天支持：已启用")
-    logger.info("✅ HTTP服务器：已启用")
-    logger.info("✅ 事件循环优化：nest_asyncio")
-    logger.info(f"🔄 自动重启配置：{RESTART_COUNT}/{MAX_RESTARTS} 次，延迟 {RESTART_DELAY} 秒")
-    logger.info("=" * 70)
-    
-    # 设置信号处理器
-    signal.signal(signal.SIGINT, signal_handler)
-    signal.signal(signal.SIGTERM, signal_handler)
+    """主程序入口"""
+    global flask_thread, bot_thread
     
     try:
+        logger.info(f"🎯 启动电话号码检测机器人 (HTML增强版 v4.2) - 重复检测修复版")
+        logger.info(f"🔄 重启保护: {RESTART_COUNT}/{MAX_RESTARTS}")
+        
         # 启动Flask服务器
-        start_flask_thread()
+        flask_thread = threading.Thread(target=run_flask, daemon=True)
+        flask_thread.start()
+        logger.info("🌐 Flask服务器线程已启动")
         
-        # 启动机器人
-        start_bot_thread()
+        # 运行Telegram机器人 (主线程)
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
         
-        logger.info("🎯 所有服务已启动，兼容版HTML格式 + 红色警示系统正在运行...")
-        logger.info("🔄 自动重启功能已激活，将在收到SIGTERM信号时自动重启")
-        
-        # 保持主线程运行
-        while not shutdown_event.is_set():
-            time.sleep(1)
-        
-    except KeyboardInterrupt:
-        logger.info("⌨️ 收到键盘中断信号")
-        shutdown_event.set()
-    except Exception as e:
-        logger.error(f"💥 程序运行错误: {e}")
-        restart_application()
+        try:
+            loop.run_until_complete(run_bot())
+        except KeyboardInterrupt:
+            logger.info("👋 用户手动停止机器人")
+        except Exception as e:
+            logger.error(f"机器人运行时发生错误: {e}")
+            restart_application()
+        finally:
+            try:
+                # 清理资源
+                pending = asyncio.all_tasks(loop)
+                for task in pending:
+                    task.cancel()
+                
+                if pending:
+                    loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
+                    
+                loop.close()
+                logger.info("事件循环已关闭")
+            except Exception as e:
+                logger.error(f"清理资源时出错: {e}")
     
-    logger.info("🔚 程序正在关闭...")
+    except Exception as e:
+        logger.error(f"程序启动失败: {e}")
+        restart_application()
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()
