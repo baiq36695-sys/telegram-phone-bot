@@ -23,8 +23,8 @@ logging.getLogger("telegram").setLevel(logging.WARNING)
 
 logger = logging.getLogger(__name__)
 
-# 从环境变量获取Bot Token
-BOT_TOKEN = os.getenv('BOT_TOKEN', 'YOUR_BOT_TOKEN_HERE')
+# 从环境变量获取Bot Token - 兼容两种变量名
+BOT_TOKEN = os.getenv('BOT_TOKEN') or os.getenv('TELEGRAM_BOT_TOKEN', 'YOUR_BOT_TOKEN_HERE')
 
 # 全局重启计数器
 restart_count = 0
@@ -160,6 +160,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 • 🔄 重启次数：{restart_count}
 
 **命令列表：**
+• `/help` - 快速帮助
 • `/stats` - 查看详细统计
 • `/clear` - 清空数据库
 
@@ -168,6 +169,32 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 """
     
     await update.message.reply_text(welcome_message, parse_mode='Markdown')
+
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """帮助命令处理"""
+    help_message = f"""
+🆘 **快速帮助** - v9.5
+═══════════════════════════
+
+📋 **可用命令：**
+• `/start` - 完整功能介绍
+• `/help` - 快速帮助（本页面）
+• `/stats` - 详细统计信息
+• `/clear` - 清空数据库
+
+📱 **使用方法：**
+直接发送电话号码给我即可自动检测！
+
+⭐ **新功能：**
+• 🔄 自动重启保护
+• ⏰ 实时时间戳显示  
+• 📊 完整统计系统
+
+═══════════════════════════
+💡 直接发送号码开始使用！
+"""
+    
+    await update.message.reply_text(help_message, parse_mode='Markdown')
 
 async def check_phone_duplicate(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """检查电话号码是否重复"""
@@ -375,7 +402,7 @@ def run_flask():
                 "uptime": calculate_uptime(),
                 "restart_count": restart_count,
                 "start_time": start_time.isoformat(),
-                "features": ["realtime_tracking", "duplicate_detection", "user_stats", "auto_restart", "full_statistics"]
+                "features": ["realtime_tracking", "duplicate_detection", "user_stats", "auto_restart", "full_statistics", "help_command"]
             }, 200
         
         @app.route('/health')
@@ -399,6 +426,7 @@ def run_bot():
         
         # 添加处理器
         application.add_handler(CommandHandler("start", start))
+        application.add_handler(CommandHandler("help", help_command))
         application.add_handler(CommandHandler("stats", stats))
         application.add_handler(CommandHandler("clear", clear_database))
         application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, check_phone_duplicate))
@@ -422,52 +450,46 @@ def main():
     """主函数 - 带自动重启功能"""
     global restart_count
     
-    max_restarts = 50  # 最大重启次数
-    restart_delay = 10   # 固定重启延迟
-    
     logger.info("=== 电话号码查重机器人 v9.5 启动 ===")
     logger.info(f"启动时间: {format_datetime(start_time)}")
     
     # 启动Flask服务器
-    try:
-        flask_thread = threading.Thread(target=run_flask, daemon=True)
-        flask_thread.start()
-        logger.info("Flask服务器线程已启动")
-        time.sleep(2)  # 等待Flask启动
-    except Exception as e:
-        logger.error(f"Flask服务器启动失败: {e}")
+    logger.info(f"Flask服务器启动，端口: {os.environ.get('PORT', 10000)}")
+    flask_thread = threading.Thread(target=run_flask, daemon=True)
+    flask_thread.start()
+    logger.info("Flask服务器线程已启动")
     
-    # 主循环，带自动重启逻辑
+    # 自动重启循环
+    max_restarts = 10  # 最大重启次数
+    base_delay = 5     # 基础延迟（秒）
+    
     while restart_count < max_restarts:
         try:
-            logger.info(f"=== 第 {restart_count + 1} 次启动机器人 ===")
+            restart_count += 1
+            logger.info(f"=== 第 {restart_count} 次启动机器人 ===")
+            
             run_bot()
             
-            # 如果正常退出，记录并跳出循环
-            logger.warning("机器人正常退出，程序结束")
-            break
-            
         except KeyboardInterrupt:
-            logger.info("收到退出信号，正常关闭...")
+            logger.info("收到键盘中断，程序正常退出")
             break
             
         except Exception as e:
-            restart_count += 1
-            logger.error(f"=== Bot异常停止 (第{restart_count}次) ===")
+            logger.error(f"=== Bot异常停止 （第{restart_count}次） ===")
             logger.error(f"异常类型: {type(e).__name__}")
             logger.error(f"异常信息: {e}")
-            logger.error(f"异常详情: {traceback.format_exc()}")
+            logger.error(f"异常详情：{traceback.format_exc()}")
             
             if restart_count >= max_restarts:
-                logger.error(f"达到最大重启次数 ({max_restarts})，程序终止")
-                sys.exit(1)
+                logger.error(f"已达到最大重启次数 ({max_restarts})，程序退出")
+                break
             
-            logger.info(f"等待 {restart_delay} 秒后自动重启... (进度: {restart_count}/{max_restarts})")
-            time.sleep(restart_delay)
-            
-            logger.info(f"=== 正在进行第 {restart_count} 次自动重启... ===")
+            # 指数退避延迟
+            delay = min(base_delay * (2 ** (restart_count - 1)), 300)  # 最多5分钟
+            logger.info(f"等待 {delay} 秒后重启...")
+            time.sleep(delay)
     
-    logger.info("=== 程序已完全退出 ===")
+    logger.info("程序已退出")
 
 if __name__ == "__main__":
     main()
