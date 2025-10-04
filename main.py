@@ -32,6 +32,7 @@ BOT_TOKEN = os.getenv('BOT_TOKEN') or os.getenv('TELEGRAM_BOT_TOKEN', 'YOUR_BOT_
 restart_count = 0
 start_time = datetime.now(timezone.utc)
 is_shutting_down = False
+received_sigterm = False  # 新增：SIGTERM信号标志
 
 # 国家代码到国旗的映射
 COUNTRY_FLAGS = {
@@ -440,18 +441,25 @@ def create_application():
         raise e
 
 def setup_signal_handlers():
-    """设置信号处理器"""
-    def signal_handler(signum, frame):
+    """设置信号处理器 - 优化重启逻辑"""
+    def sigterm_handler(signum, frame):
+        # SIGTERM: 优雅关闭当前实例，但允许重启
+        global received_sigterm
+        logger.info(f"收到SIGTERM信号({signum})，优雅关闭当前实例...")
+        received_sigterm = True  # 设置SIGTERM标志，允许重启
+    
+    def sigint_handler(signum, frame):
+        # SIGINT: 用户手动终止，完全停止
         global is_shutting_down
-        logger.info(f"收到信号 {signum}，准备优雅关闭...")
+        logger.info(f"收到SIGINT信号({signum})，用户手动终止程序...")
         is_shutting_down = True
     
-    signal.signal(signal.SIGTERM, signal_handler)
-    signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGTERM, sigterm_handler)  # 平台重启 - 允许重启
+    signal.signal(signal.SIGINT, sigint_handler)   # 手动终止 - 停止重启
 
 async def run_bot():
     """运行机器人主程序 - 增强版"""
-    global is_shutting_down
+    global is_shutting_down, received_sigterm
     
     try:
         logger.info("🔄 创建新的事件循环...")
@@ -468,7 +476,7 @@ async def run_bot():
         # 添加心跳日志
         async def heartbeat():
             count = 0
-            while not is_shutting_down:
+            while not is_shutting_down and not received_sigterm:
                 await asyncio.sleep(300)  # 每5分钟打印一次心跳
                 count += 1
                 logger.info(f"💓 心跳检查 #{count} - 机器人运行正常")
@@ -492,9 +500,14 @@ async def run_bot():
                 bootstrap_retries=3
             )
             
-            # 等待直到需要停止
-            while not is_shutting_down:
+            # 等待直到需要停止（SIGINT）或重启（SIGTERM）
+            while not is_shutting_down and not received_sigterm:
                 await asyncio.sleep(1)
+                
+            if received_sigterm:
+                logger.info("🔄 收到SIGTERM，准备重启...")
+            else:
+                logger.info("🛑 收到停止信号，准备退出...")
                 
         except Exception as e:
             logger.error(f"轮询过程中出错: {e}")
@@ -518,7 +531,7 @@ async def run_bot():
 
 def main():
     """主函数 - 增强重启机制"""
-    global restart_count, is_shutting_down
+    global restart_count, is_shutting_down, received_sigterm
     
     logger.info("=== 电话号码查重机器人 v9.5 启动 ===")
     logger.info(f"启动时间: {format_datetime(start_time)}")
@@ -541,14 +554,19 @@ def main():
     while restart_count < max_restarts and not is_shutting_down:
         try:
             restart_count += 1
+            received_sigterm = False  # 重置SIGTERM标志
             logger.info(f"=== 第 {restart_count} 次启动机器人 ===")
             
             # 运行机器人
             asyncio.run(run_bot())
             
-            # 如果到达这里说明正常退出
-            logger.warning("机器人正常退出")
-            consecutive_failures = 0  # 重置连续失败计数
+            # 如果到达这里说明正常退出或收到SIGTERM
+            if received_sigterm:
+                logger.info("🔄 收到SIGTERM信号，准备重启...")
+                consecutive_failures = 0  # SIGTERM不算失败
+            else:
+                logger.warning("机器人正常退出")
+                consecutive_failures = 0  # 重置连续失败计数
             
         except KeyboardInterrupt:
             logger.info("🛑 收到键盘中断，程序正常退出")
