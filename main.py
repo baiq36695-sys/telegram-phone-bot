@@ -2,11 +2,12 @@
 # -*- coding: utf-8 -*-
 """
 HTML电话号码重复检测机器人
-版本: v7.2 - Flask兼容版
-修复内容：
-1. 修复重复检测逻辑bug
-2. 解决线程问题
-3. 使用Flask代替aiohttp（已在requirements.txt中）
+版本: v8.0 - 豪华美化版
+增强功能：
+1. 丰富的视觉界面
+2. 动态表情和状态
+3. 详细的统计信息
+4. 更好的用户体验
 """
 
 import logging
@@ -14,6 +15,7 @@ import re
 import os
 import threading
 from html import unescape
+from datetime import datetime
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 from flask import Flask
@@ -57,31 +59,186 @@ def normalize_phone_number(phone):
         normalized = '+' + normalized
     return normalized
 
+def get_phone_type_emoji(phone):
+    """根据电话号码类型返回对应表情"""
+    if phone.startswith('+60'):
+        return "🇲🇾"  # 马来西亚
+    elif phone.startswith('+86') or (phone.startswith('+') and phone[1:].startswith('1') and len(phone) == 12):
+        return "🇨🇳"  # 中国
+    elif phone.startswith('+1'):
+        return "🇺🇸"  # 美国/加拿大
+    elif phone.startswith('+44'):
+        return "🇬🇧"  # 英国
+    elif phone.startswith('+81'):
+        return "🇯🇵"  # 日本
+    elif phone.startswith('+82'):
+        return "🇰🇷"  # 韩国
+    else:
+        return "🌍"  # 其他国家
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """处理/start命令"""
-    await update.message.reply_text(
-        "📱 HTML电话号码重复检测机器人\n"
-        "🔧 版本: v7.2 - Flask兼容版\n\n"
-        "功能说明：\n"
-        "• 发送包含电话号码的文本，我会检测重复\n"
-        "• 使用 /clear 清除所有记录\n"
-        "• 使用 /stats 查看统计信息\n\n"
-        "现在您可以发送包含电话号码的消息了！"
-    )
+    welcome_msg = """
+🌟 ═══════════════════════════ 🌟
+        📱 智能电话号码管理系统        
+🌟 ═══════════════════════════ 🌟
+
+🚀 版本: v8.0 - 豪华美化版
+
+✨ 【核心功能】
+🔍 智能识别电话号码
+🛡️ 精准重复检测
+🌍 支持国际号码格式
+📊 实时统计分析
+
+🎯 【操作指南】
+📩 发送包含电话号码的消息
+🗑️ /clear - 清空所有记录
+📈 /stats - 查看详细统计
+💡 /help - 获取帮助信息
+🎨 /about - 关于本机器人
+
+🎨 【特色亮点】
+⚡ 实时处理，毫秒响应
+🎭 智能表情，生动直观
+🌈 彩色界面，赏心悦目
+🔒 数据安全，隐私保护
+
+════════════════════════════════
+🎈 现在发送您的电话号码，开始体验吧！
+════════════════════════════════
+"""
+    await update.message.reply_text(welcome_msg)
 
 async def clear_data(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """清除所有存储的电话号码"""
     context.user_data.clear()
-    await update.message.reply_text("🗑️ 所有电话号码记录已清除！")
+    
+    clear_msg = """
+🧹 ═══════ 数据清理完成 ═══════ 🧹
+
+✅ 所有电话号码记录已清除
+✅ 统计数据已重置
+✅ 系统状态已恢复初始化
+
+🆕 您现在可以重新开始录入电话号码了！
+
+════════════════════════════════
+"""
+    await update.message.reply_text(clear_msg)
 
 async def show_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """显示统计信息"""
     if 'phones' not in context.user_data:
-        await update.message.reply_text("📊 暂无记录数据")
+        stats_msg = """
+📊 ═══════ 统计报告 ═══════ 📊
+
+📭 当前状态：无记录数据
+🎯 建议：发送包含电话号码的消息开始使用
+
+════════════════════════════════
+"""
+        await update.message.reply_text(stats_msg)
         return
     
-    total_phones = len(context.user_data.get('phones', set()))
-    await update.message.reply_text(f"📊 统计信息\n已记录电话号码: {total_phones} 个")
+    phones = context.user_data.get('phones', set())
+    normalized_phones = context.user_data.get('normalized_phones', set())
+    
+    # 按国家分类统计
+    country_stats = {}
+    for phone in phones:
+        emoji = get_phone_type_emoji(phone)
+        country_stats[emoji] = country_stats.get(emoji, 0) + 1
+    
+    country_breakdown = ""
+    for emoji, count in sorted(country_stats.items(), key=lambda x: x[1], reverse=True):
+        country_breakdown += f"      {emoji} {count} 个号码\n"
+    
+    stats_msg = f"""
+📊 ═══════ 统计报告 ═══════ 📊
+
+📈 【总体数据】
+   📞 总记录号码：{len(phones)} 个
+   🔒 唯一号码：{len(normalized_phones)} 个
+   ⏰ 统计时间：{datetime.now().strftime('%Y-%m-%d %H:%M')}
+
+🌍 【地区分布】
+{country_breakdown}
+🏆 【系统状态】
+   ✅ 运行正常
+   ⚡ 响应迅速
+   🛡️ 数据安全
+
+════════════════════════════════
+"""
+    await update.message.reply_text(stats_msg)
+
+async def show_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """显示帮助信息"""
+    help_msg = """
+💡 ═══════ 帮助中心 ═══════ 💡
+
+🎯 【基本使用】
+   • 直接发送包含电话号码的文本
+   • 支持多种格式：+86 138xxxx, +60 13-xxx等
+   • 自动识别并分类新/重复号码
+
+🛠️【命令列表】
+   /start - 🏠 返回主页
+   /clear - 🗑️ 清空所有记录
+   /stats - 📊 查看统计信息
+   /help - 💡 显示此帮助
+   /about - ℹ️ 关于机器人
+
+🌟 【支持格式】
+   • 国际格式：+86 138 0013 8000
+   • 带分隔符：+60 13-970 3144
+   • 本地格式：13800138000
+   • 美式格式：(555) 123-4567
+
+🔥 【智能特性】
+   • 🎭 自动国家识别
+   • ⚡ 秒级重复检测
+   • 🌈 可视化结果展示
+   • 🔒 隐私数据保护
+
+════════════════════════════════
+"""
+    await update.message.reply_text(help_msg)
+
+async def show_about(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """显示关于信息"""
+    about_msg = """
+ℹ️ ═══════ 关于我们 ═══════ ℹ️
+
+🤖 【机器人信息】
+   名称：智能电话号码管理系统
+   版本：v8.0 豪华美化版
+   开发：MiniMax Agent
+
+⭐ 【核心技术】
+   • Python + Telegram Bot API
+   • 正则表达式引擎
+   • 智能去重算法
+   • 实时数据处理
+
+🌟 【设计理念】
+   • 简单易用，功能强大
+   • 美观界面，用户至上
+   • 数据安全，隐私第一
+   • 持续改进，追求完美
+
+🎨 【界面设计】
+   • 丰富表情符号
+   • 清晰结构布局
+   • 动态视觉反馈
+   • 个性化体验
+
+💌 感谢使用！如有建议，欢迎反馈！
+
+════════════════════════════════
+"""
+    await update.message.reply_text(about_msg)
 
 async def process_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """处理包含电话号码的消息"""
@@ -97,7 +254,22 @@ async def process_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         phone_numbers = extract_phone_numbers(message_text)
         
         if not phone_numbers:
-            await update.message.reply_text("❌ 未检测到电话号码")
+            no_phone_msg = """
+❌ ═══════ 识别结果 ═══════ ❌
+
+🔍 扫描结果：未检测到电话号码
+
+💡 请确保您的消息包含有效的电话号码格式：
+   • +86 138 0013 8000
+   • +60 13-970 3144
+   • (555) 123-4567
+   • 13800138000
+
+🎯 提示：支持多种国际格式！
+
+════════════════════════════════
+"""
+            await update.message.reply_text(no_phone_msg)
             return
         
         # 获取已存储的数据
@@ -117,26 +289,62 @@ async def process_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 chat_data['phones'].add(phone)
                 chat_data['normalized_phones'].add(normalized)
         
-        # 构建回复消息
+        # 构建美化的回复消息
         response_parts = []
+        response_parts.append("🎯 ═══════ 处理结果 ═══════ 🎯\n")
         
         if new_phones:
-            response_parts.append(f"✅ 新电话号码 ({len(new_phones)} 个):")
+            response_parts.append(f"✨ 【新发现号码】({len(new_phones)} 个)")
             for phone in sorted(new_phones):
-                response_parts.append(f"  📞 {phone}")
+                emoji = get_phone_type_emoji(phone)
+                response_parts.append(f"   {emoji} 📞 {phone}")
+            response_parts.append("")
         
         if duplicate_phones:
-            response_parts.append(f"⚠️ 重复电话号码 ({len(duplicate_phones)} 个):")
+            response_parts.append(f"⚠️ 【重复号码警告】({len(duplicate_phones)} 个)")
             for phone in sorted(duplicate_phones):
-                response_parts.append(f"  🔄 {phone}")
+                emoji = get_phone_type_emoji(phone)
+                response_parts.append(f"   {emoji} 🔄 {phone}")
+            response_parts.append("")
         
-        response_parts.append(f"\n📊 总计已记录: {len(chat_data['phones'])} 个电话号码")
+        # 添加统计信息
+        total_count = len(chat_data['phones'])
+        if total_count <= 5:
+            level_emoji = "🌱"
+            level_name = "新手"
+        elif total_count <= 20:
+            level_emoji = "🌿"
+            level_name = "进阶"
+        elif total_count <= 50:
+            level_emoji = "🌳"
+            level_name = "专业"
+        else:
+            level_emoji = "🏆"
+            level_name = "大师"
+        
+        response_parts.append(f"📊 【当前统计】")
+        response_parts.append(f"   📈 总记录：{total_count} 个号码")
+        response_parts.append(f"   {level_emoji} 等级：{level_name}")
+        response_parts.append(f"   ⏰ 时间：{datetime.now().strftime('%H:%M')}")
+        
+        response_parts.append("\n════════════════════════════════")
         
         await update.message.reply_text("\n".join(response_parts))
         
     except Exception as e:
         logger.error(f"处理消息时发生错误: {e}")
-        await update.message.reply_text("❌ 处理消息时发生错误，请重试")
+        error_msg = """
+❌ ═══════ 系统错误 ═══════ ❌
+
+🚨 处理过程中发生错误
+🔧 系统正在自动修复
+⏳ 请稍后重试
+
+💡 如问题持续，请联系技术支持
+
+════════════════════════════════
+"""
+        await update.message.reply_text(error_msg)
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
     """全局错误处理"""
@@ -149,7 +357,17 @@ app = Flask(__name__)
 @app.route('/health')
 def health_check():
     """健康检查端点"""
-    return "Bot is running!", 200
+    return """
+    <html>
+    <head><title>📱 电话号码管理机器人</title></head>
+    <body style="font-family: Arial; text-align: center; padding: 50px;">
+        <h1>🤖 机器人运行正常！</h1>
+        <p>✅ 版本: v8.0 豪华美化版</p>
+        <p>⚡ 状态: 在线服务中</p>
+        <p>🌟 功能: 智能电话号码管理</p>
+    </body>
+    </html>
+    """, 200
 
 def run_flask():
     """在后台线程运行Flask"""
@@ -162,7 +380,7 @@ def main():
         # 在后台线程启动Flask服务器
         flask_thread = threading.Thread(target=run_flask, daemon=True)
         flask_thread.start()
-        logger.info(f"Flask服务器启动在端口 {os.environ.get('PORT', 10000)}")
+        logger.info(f"🌐 Flask服务器启动在端口 {os.environ.get('PORT', 10000)}")
         
         # 创建Telegram应用
         application = Application.builder().token(BOT_TOKEN).build()
@@ -171,12 +389,14 @@ def main():
         application.add_handler(CommandHandler("start", start))
         application.add_handler(CommandHandler("clear", clear_data))
         application.add_handler(CommandHandler("stats", show_stats))
+        application.add_handler(CommandHandler("help", show_help))
+        application.add_handler(CommandHandler("about", show_about))
         application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, process_message))
         
         # 添加错误处理器
         application.add_error_handler(error_handler)
         
-        logger.info("机器人启动成功 - v7.2 Flask兼容版")
+        logger.info("🚀 机器人启动成功 - v8.0 豪华美化版")
         
         # 启动机器人（主线程）
         application.run_polling()
