@@ -2,6 +2,9 @@ import os
 import re
 import logging
 import threading
+import time
+import sys
+import traceback
 from datetime import datetime, timezone
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
@@ -22,6 +25,10 @@ logger = logging.getLogger(__name__)
 
 # 从环境变量获取Bot Token
 BOT_TOKEN = os.getenv('BOT_TOKEN', 'YOUR_BOT_TOKEN_HERE')
+
+# 全局重启计数器
+restart_count = 0
+start_time = datetime.now(timezone.utc)
 
 # 国家代码到国旗的映射
 COUNTRY_FLAGS = {
@@ -87,6 +94,18 @@ def get_country_flag(phone):
     
     return '🌍'  # 默认地球图标
 
+def get_country_code(phone):
+    """获取国家代码"""
+    clean_phone = normalize_phone(phone)
+    
+    for code_length in [4, 3, 2, 1]:
+        if len(clean_phone) >= code_length:
+            country_code = clean_phone[:code_length]
+            if country_code in COUNTRY_FLAGS:
+                return country_code
+    
+    return 'Unknown'
+
 def format_datetime(dt):
     """格式化日期时间为易读格式"""
     return dt.strftime('%Y-%m-%d %H:%M:%S')
@@ -96,32 +115,53 @@ def get_user_level_emoji(user_id):
     levels = ['👤', '⭐', '🌟', '💎', '👑', '🔥', '⚡', '🚀']
     return levels[user_id % len(levels)]
 
+def calculate_uptime():
+    """计算运行时间"""
+    current_time = datetime.now(timezone.utc)
+    uptime = current_time - start_time
+    
+    days = uptime.days
+    hours, remainder = divmod(uptime.seconds, 3600)
+    minutes, seconds = divmod(remainder, 60)
+    
+    if days > 0:
+        return f"{days}天 {hours}小时 {minutes}分钟"
+    elif hours > 0:
+        return f"{hours}小时 {minutes}分钟"
+    else:
+        return f"{minutes}分钟 {seconds}秒"
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """开始命令处理"""
     user = update.effective_user
     level_emoji = get_user_level_emoji(user.id)
+    uptime = calculate_uptime()
     
     welcome_message = f"""
-🎉 **电话号码查重机器人 v9.1** 🎉
+🎉 **电话号码查重机器人 v9.5** 🎉
 ═══════════════════════════
 
 👋 欢迎，{level_emoji} **{user.full_name}**！
 
 🔍 **功能特点：**
 • 智能去重检测
-• 实时时间显示
+• 实时时间显示  
 • 用户追踪系统
 • 重复次数统计
 • 国家识别标识
+• 📊 完整统计功能
+• 🔄 稳定自动重启
 
 📱 **使用方法：**
 直接发送电话号码给我，我会帮您检查是否重复！
 
-✨ **新增功能：**
-• 📅 显示首次添加时间
-• ⏰ 显示当前检测时间
-• 👥 显示重复用户信息
-• 🔢 显示重复总次数
+✨ **运行状态：**
+• ⏰ 运行时间：{uptime}
+• 🔄 重启次数：{restart_count}
+
+**命令列表：**
+• `/stats` - 查看详细统计
+• `/clear` - 清空数据库
 
 ═══════════════════════════
 🚀 开始发送电话号码吧！
@@ -234,13 +274,14 @@ async def check_phone_duplicate(update: Update, context: ContextTypes.DEFAULT_TY
         
     except Exception as e:
         logger.error(f"处理消息时出错: {e}")
+        logger.error(f"错误详情: {traceback.format_exc()}")
         await update.message.reply_text(
             "❌ 处理消息时出现错误，请稍后重试。",
             parse_mode='Markdown'
         )
 
 async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """显示统计信息"""
+    """显示详细统计信息"""
     if 'phone_database' not in context.chat_data:
         await update.message.reply_text("📊 暂无数据记录。")
         return
@@ -248,55 +289,110 @@ async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     phone_database = context.chat_data['phone_database']
     total_numbers = len(phone_database)
     total_duplicates = sum(1 for info in phone_database.values() if info['count'] > 1)
+    unique_numbers = total_numbers - total_duplicates
+    
+    # 统计国家分布
+    country_stats = {}
+    for info in phone_database.values():
+        country_code = get_country_code(info['original_number'])
+        country_flag = get_country_flag(info['original_number'])
+        country_key = f"{country_flag} {country_code}"
+        country_stats[country_key] = country_stats.get(country_key, 0) + 1
+    
+    # 按数量排序
+    sorted_countries = sorted(country_stats.items(), key=lambda x: x[1], reverse=True)
+    top_countries = sorted_countries[:5]  # 显示前5名
+    
+    country_text = ""
+    if top_countries:
+        country_text = "\n🌍 **国家分布（Top 5）：**\n"
+        for country, count in top_countries:
+            country_text += f"• {country}: {count} 个号码\n"
+    
+    # 计算总重复次数
+    total_repeat_count = sum(info['count'] for info in phone_database.values())
+    
+    uptime = calculate_uptime()
     
     stats_message = f"""
-📊 **数据库统计** 📊
+📊 **数据库完整统计** 📊
 ═══════════════════════════
 
-📱 **总记录数：** {total_numbers}
-🔄 **重复号码：** {total_duplicates}
-✅ **唯一号码：** {total_numbers - total_duplicates}
+📱 **号码统计：**
+• 总记录数：**{total_numbers}** 个
+• 重复号码：**{total_duplicates}** 个
+• 唯一号码：**{unique_numbers}** 个
+• 总重复次数：**{total_repeat_count}** 次
+
+{country_text}
+
+⚙️ **运行状态：**
+• ⏰ 运行时间：{uptime}
+• 🔄 重启次数：{restart_count}
+• 📅 启动时间：{format_datetime(start_time)}
 
 ═══════════════════════════
-💡 使用 /clear 清空数据库
+💡 使用 `/clear` 清空数据库
 """
     
     await update.message.reply_text(stats_message, parse_mode='Markdown')
 
 async def clear_database(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """清空数据库"""
+    old_count = len(context.chat_data.get('phone_database', {}))
     context.chat_data['phone_database'] = {}
-    await update.message.reply_text(
-        "🗑️ **数据库已清空！**\n所有记录已删除。",
-        parse_mode='Markdown'
-    )
+    
+    clear_message = f"""
+🗑️ **数据库已清空！** 🗑️
+═══════════════════════════
+
+📊 **清理统计：**
+• 已删除：**{old_count}** 条记录
+• 当前状态：数据库为空
+• 清理时间：{format_datetime(datetime.now(timezone.utc))}
+
+═══════════════════════════
+✨ 可以重新开始记录号码了！
+"""
+    
+    await update.message.reply_text(clear_message, parse_mode='Markdown')
 
 def run_flask():
     """运行Flask服务器"""
-    app = Flask(__name__)
-    
-    @app.route('/')
-    def health_check():
-        return "Phone Bot v9.1 is alive! 🚀", 200
-    
-    @app.route('/status')
-    def status():
-        return {
-            "status": "running",
-            "version": "9.1",
-            "features": ["realtime_tracking", "duplicate_detection", "user_stats"]
-        }, 200
-    
-    port = int(os.environ.get('PORT', 10000))
-    app.run(host='0.0.0.0', port=port, debug=False, use_reloader=False)
-
-def main():
-    """主函数"""
     try:
-        # 启动Flask服务器
-        flask_thread = threading.Thread(target=run_flask, daemon=True)
-        flask_thread.start()
-        logger.info("Flask服务器已启动")
+        app = Flask(__name__)
+        
+        @app.route('/')
+        def health_check():
+            uptime = calculate_uptime()
+            return f"Phone Bot v9.5 is alive! 🚀<br>Uptime: {uptime}<br>Restarts: {restart_count}", 200
+        
+        @app.route('/status')
+        def status():
+            return {
+                "status": "running",
+                "version": "9.5",
+                "uptime": calculate_uptime(),
+                "restart_count": restart_count,
+                "start_time": start_time.isoformat(),
+                "features": ["realtime_tracking", "duplicate_detection", "user_stats", "auto_restart", "full_statistics"]
+            }, 200
+        
+        @app.route('/health')
+        def health():
+            return {"healthy": True, "timestamp": datetime.now(timezone.utc).isoformat()}, 200
+        
+        port = int(os.environ.get('PORT', 10000))
+        logger.info(f"Flask服务器启动，端口: {port}")
+        app.run(host='0.0.0.0', port=port, debug=False, use_reloader=False)
+        
+    except Exception as e:
+        logger.error(f"Flask服务器启动失败: {e}")
+
+def run_bot():
+    """运行机器人主程序"""
+    try:
+        logger.info("开始创建Telegram应用...")
         
         # 创建Telegram应用
         application = Application.builder().token(BOT_TOKEN).build()
@@ -307,13 +403,71 @@ def main():
         application.add_handler(CommandHandler("clear", clear_database))
         application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, check_phone_duplicate))
         
-        logger.info("电话号码查重机器人 v9.1 启动成功！")
+        logger.info(f"电话号码查重机器人 v9.5 启动成功！重启次数: {restart_count}")
         
-        # 启动机器人
-        application.run_polling()
+        # 启动机器人 - 使用简单的参数
+        logger.info("开始运行轮询...")
+        application.run_polling(
+            drop_pending_updates=True  # 丢弃待处理的更新
+        )
+        
+        logger.warning("application.run_polling() 意外退出")
         
     except Exception as e:
-        logger.error(f"Bot启动失败: {e}")
+        logger.error(f"Bot运行出错: {e}")
+        logger.error(f"Bot错误详情: {traceback.format_exc()}")
+        raise e
+
+def main():
+    """主函数 - 带自动重启功能"""
+    global restart_count
+    
+    max_restarts = 50  # 最大重启次数
+    restart_delay = 10   # 固定重启延迟
+    
+    logger.info("=== 电话号码查重机器人 v9.5 启动 ===")
+    logger.info(f"启动时间: {format_datetime(start_time)}")
+    
+    # 启动Flask服务器
+    try:
+        flask_thread = threading.Thread(target=run_flask, daemon=True)
+        flask_thread.start()
+        logger.info("Flask服务器线程已启动")
+        time.sleep(2)  # 等待Flask启动
+    except Exception as e:
+        logger.error(f"Flask服务器启动失败: {e}")
+    
+    # 主循环，带自动重启逻辑
+    while restart_count < max_restarts:
+        try:
+            logger.info(f"=== 第 {restart_count + 1} 次启动机器人 ===")
+            run_bot()
+            
+            # 如果正常退出，记录并跳出循环
+            logger.warning("机器人正常退出，程序结束")
+            break
+            
+        except KeyboardInterrupt:
+            logger.info("收到退出信号，正常关闭...")
+            break
+            
+        except Exception as e:
+            restart_count += 1
+            logger.error(f"=== Bot异常停止 (第{restart_count}次) ===")
+            logger.error(f"异常类型: {type(e).__name__}")
+            logger.error(f"异常信息: {e}")
+            logger.error(f"异常详情: {traceback.format_exc()}")
+            
+            if restart_count >= max_restarts:
+                logger.error(f"达到最大重启次数 ({max_restarts})，程序终止")
+                sys.exit(1)
+            
+            logger.info(f"等待 {restart_delay} 秒后自动重启... (进度: {restart_count}/{max_restarts})")
+            time.sleep(restart_delay)
+            
+            logger.info(f"=== 正在进行第 {restart_count} 次自动重启... ===")
+    
+    logger.info("=== 程序已完全退出 ===")
 
 if __name__ == "__main__":
     main()
