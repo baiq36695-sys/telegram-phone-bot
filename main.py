@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """
 电话号码重复检测机器人 - HTML格式完整版 + 红色重复警示
+兼容最新版本的python-telegram-bot
 包含完整的HTML格式化报告，重复号码显示红色警告
 集成自动重启功能，确保服务持续运行
 """
@@ -290,14 +291,15 @@ def health_check():
     global is_running, RESTART_COUNT
     return jsonify({
         'status': 'healthy',
-        'service': 'telegram-phone-bot-html-red-warning',
+        'service': 'telegram-phone-bot-html-red-warning-v2',
         'bot_running': is_running,
         'restart_count': RESTART_COUNT,
         'max_restarts': MAX_RESTARTS,
         'auto_restart': 'enabled',
         'html_format': 'enabled',
         'red_warning': 'enabled',
-        'features': ['html_format', 'red_duplicate_warning', 'auto_restart'],
+        'compatible_filters': 'enabled',
+        'features': ['html_format', 'red_duplicate_warning', 'auto_restart', 'compatible_filters'],
         'timestamp': time.time()
     })
 
@@ -312,7 +314,8 @@ def status():
         'restart_count': RESTART_COUNT,
         'auto_restart_enabled': True,
         'html_format_enabled': True,
-        'red_warning_enabled': True
+        'red_warning_enabled': True,
+        'compatible_filters_enabled': True
     })
 
 @app.route('/restart')
@@ -455,12 +458,13 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 🎯 系统状态:
 • HTML格式: ✅ 已启用
 • 红色警示: ✅ 已启用
+• 兼容过滤器: ✅ 已启用
 • 风险检测: ✅ 智能评估已启用
 • 自动重启保护: ✅ 已启用
 
 ---
-🤖 电话号码检测机器人 HTML增强版 v4.0
-🔴 集成红色重复号码警示系统</pre>"""
+🤖 电话号码检测机器人 HTML增强版 v4.1
+🔴 集成红色重复号码警示系统 + 兼容过滤器</pre>"""
     
     await update.message.reply_text(stats_text, parse_mode='HTML')
 
@@ -483,6 +487,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 • HTML格式化显示
 • 重复号码红色警示
 • 智能风险评估
+• 兼容性过滤器
 
 🔄 自动重启功能:
 • 重启次数: {RESTART_COUNT}/{MAX_RESTARTS}
@@ -600,11 +605,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 • 运行状态: ✅ 正常运行  
 • HTML格式: ✅ 已启用
 • 红色警示: ✅ 已启用
+• 兼容过滤器: ✅ 已启用
 • 自动重启: ✅ 保护中
 
 =====================================
-🤖 电话号码检测机器人 HTML增强版 v4.0
-🔴 集成红色重复号码警示系统
+🤖 电话号码检测机器人 HTML增强版 v4.1
+🔴 集成红色重复号码警示系统 + 兼容过滤器
 ⏰ {now}</pre>"""
         
         # 发送完整的HTML格式报告
@@ -670,14 +676,17 @@ async def run_bot():
         bot_application.add_handler(CommandHandler("clear", clear_command))
         bot_application.add_handler(CommandHandler("stats", stats_command))
         bot_application.add_handler(CommandHandler("help", help_command))
+        
+        # 🔧 使用最基本且兼容的过滤器设置
         bot_application.add_handler(MessageHandler(
-            filters.TEXT & (filters.PRIVATE | filters.GROUP | filters.SUPERGROUP) & ~filters.COMMAND,
+            filters.TEXT & ~filters.COMMAND,
             handle_message
         ))
         
         is_running = True
         logger.info("✅ HTML格式电话号码检测机器人已启动！")
         logger.info("🔴 红色重复号码警示功能已启用")
+        logger.info("🔧 使用兼容性过滤器设置")
         logger.info("🔄 启用自动重启保护功能")
         logger.info("🔧 使用nest_asyncio解决事件循环冲突")
         
@@ -739,11 +748,12 @@ def main():
     global RESTART_COUNT
     
     logger.info("=" * 70)
-    logger.info(f"📱 电话号码检测机器人 - HTML格式 + 红色警示 (重启次数: {RESTART_COUNT})")
+    logger.info(f"📱 电话号码检测机器人 - 兼容版 + 红色警示 (重启次数: {RESTART_COUNT})")
     logger.info("✅ HTML格式化显示：已启用")
     logger.info("✅ 红色重复号码警示：已启用")
+    logger.info("✅ 兼容性过滤器：已启用")
     logger.info("✅ 自动重启保护机制：已启用")
-    logger.info("✅ 群组聊天支持：已启用")
+    logger.info("✅ 通用聊天支持：已启用")
     logger.info("✅ HTTP服务器：已启用")
     logger.info("✅ 事件循环优化：nest_asyncio")
     logger.info(f"🔄 自动重启配置：{RESTART_COUNT}/{MAX_RESTARTS} 次，延迟 {RESTART_DELAY} 秒")
@@ -760,7 +770,7 @@ def main():
         # 启动机器人
         start_bot_thread()
         
-        logger.info("🎯 所有服务已启动，HTML格式 + 红色警示系统正在运行...")
+        logger.info("🎯 所有服务已启动，兼容版HTML格式 + 红色警示系统正在运行...")
         logger.info("🔄 自动重启功能已激活，将在收到SIGTERM信号时自动重启")
         
         # 保持主线程运行
