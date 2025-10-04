@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-完全修正版本的Telegram电话号码检测机器人 v6.0
-专门修复电话号码正则表达式问题
+兼容版本的Telegram电话号码检测机器人 v6.1
+专门解决马来西亚格式 + 兼容性问题
 """
 
 import os
@@ -47,7 +47,7 @@ PORT = int(os.getenv('PORT', 8000))
 # 全局数据存储
 user_data_storage = defaultdict(lambda: {
     'phones': set(),
-    'normalized_phones': set(),  # 新增：专门用于重复检测的标准化号码集合
+    'normalized_phones': set(),  # 专门用于重复检测的标准化号码集合
     'risk_scores': {},
     'warnings_issued': set(),
     'last_activity': None,
@@ -74,7 +74,7 @@ def normalize_phone_number(phone: str) -> str:
     return re.sub(r'[^\d+]', '', phone)
 
 def extract_phone_numbers(text: str) -> Set[str]:
-    """从文本中提取电话号码 - 完全修正的马来西亚格式支持"""
+    """从文本中提取电话号码 - 专门修正马来西亚格式支持"""
     patterns = [
         # 马来西亚电话号码（修正版本 - 支持3位-4位和4位-4位格式）
         r'\+60\s*1[0-9][\s-]*\d{3}[\s-]+\d{4}',          # +60 13-970 3144 或 +60 13 970 3144
@@ -277,15 +277,14 @@ def generate_detailed_html_report(user_data: dict, new_phones: set, duplicates: 
     report_lines.append(f"• 运行状态：{'✅ 正常运行' if is_running else '❌ 系统异常'}")
     report_lines.append(f"• HTML渲染：✅ 已启用")
     report_lines.append(f"• 红色警告：✅ 已启用")
-    report_lines.append(f"• 联合过滤：✅ 已启用")
-    report_lines.append(f"• 自动重启：✅ 使用中")
-    report_lines.append(f"• 重复重复检测版本：✅ v6.0")
+    report_lines.append(f"• 马来西亚格式：✅ 完全支持")
+    report_lines.append(f"• 重复检测：✅ v6.1 兼容版")
     report_lines.append("")
     
     # 分隔线和版本信息
     report_lines.append("=" * 45)
-    report_lines.append("🤖 <b>自适应号码解析系统完全修正版</b> HTML渲染器 v6.0")
-    report_lines.append("🚀 <b>集成红色重复警告系统，常驻重复检测引擎</b>")
+    report_lines.append("🤖 <b>电话号码检测系统兼容版</b> v6.1")
+    report_lines.append("🚀 <b>马来西亚格式完全支持 + 兼容性修复</b>")
     
     return '\n'.join(report_lines)
 
@@ -296,21 +295,21 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     
     welcome_message = (
         f"👋 欢迎使用，{user_name}！\n\n"
-        "🤖 <b>自适应号码解析系统完全修正版</b> v6.0\n"
-        "🎯 <b>终极重复检测修复 + 马来西亚格式支持</b>\n\n"
+        "🤖 <b>电话号码检测系统兼容版</b> v6.1\n"
+        "🎯 <b>马来西亚格式完全支持 + 兼容性修复</b>\n\n"
         "📱 <b>功能特色</b>：\n"
         "• 🔍 智能电话号码识别\n"
-        "• 🌍 多国格式支持（特别优化马来西亚格式）\n"
+        "• 🌍 多国格式支持（专门优化马来西亚格式）\n"
         "• 🚨 精确重复检测警告\n"
         "• 📊 详细HTML格式报告\n"
-        "• 🔄 自动状态管理\n\n"
+        "• 🔧 兼容性修复\n\n"
         "💡 <b>使用方法</b>：\n"
         "直接发送包含电话号码的文本，系统会自动识别并分析\n\n"
         "🎛️ <b>控制命令</b>：\n"
         "/clear - 清除历史数据\n"
         "/status - 查看系统状态\n"
         "/help - 帮助信息\n\n"
-        "🔧 当前版本：v6.0 - 完全修正的马来西亚格式支持"
+        "🔧 当前版本：v6.1 - 兼容修复版"
     )
     
     await update.message.reply_text(welcome_message, parse_mode=ParseMode.HTML)
@@ -356,13 +355,13 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         f"🔧 <b>系统状态</b>：\n"
         f"• 运行状态：{'✅ 正常' if is_running else '❌ 异常'}\n"
         f"• HTML渲染：✅ 已启用\n"
-        f"• 重复检测：✅ v6.0\n"
-        f"• 自动重启：✅ 启用\n\n"
+        f"• 重复检测：✅ v6.1\n"
+        f"• 兼容性：✅ 修复完成\n\n"
         f"🌍 <b>格式支持</b>：\n"
         f"• 马来西亚：✅ 完全支持\n"
         f"• 中国：✅ 支持\n"
         f"• 国际格式：✅ 支持\n\n"
-        f"版本：v6.0 - 完全修正版"
+        f"版本：v6.1 - 兼容修复版"
     )
     
     await update.message.reply_text(status_message, parse_mode=ParseMode.HTML)
@@ -483,7 +482,7 @@ def health_check():
     return jsonify({
         'status': 'healthy',
         'timestamp': datetime.now().isoformat(),
-        'version': 'v6.0',
+        'version': 'v6.1',
         'bot_running': is_running,
         'uptime': time.time()
     })
@@ -497,8 +496,8 @@ def get_stats():
     return jsonify({
         'total_users': total_users,
         'total_phones': total_phones,
-        'version': 'v6.0',
-        'features': ['duplicate_detection', 'html_rendering', 'malaysia_support']
+        'version': 'v6.1',
+        'features': ['duplicate_detection', 'html_rendering', 'malaysia_support', 'compatibility_fix']
     })
 
 @app.route('/', methods=['GET'])
@@ -508,7 +507,7 @@ def index():
     <!DOCTYPE html>
     <html>
     <head>
-        <title>电话号码检测机器人 v6.0</title>
+        <title>电话号码检测机器人 v6.1</title>
         <style>
             body { font-family: Arial, sans-serif; margin: 40px; }
             .status { color: green; font-weight: bold; }
@@ -517,9 +516,9 @@ def index():
     </head>
     <body>
         <h1>🤖 电话号码检测机器人</h1>
-        <p class="version">版本：v6.0 - 完全修正版</p>
+        <p class="version">版本：v6.1 - 兼容修复版</p>
         <p class="status">✅ 系统运行正常</p>
-        <p>🔧 特性：智能重复检测、HTML渲染、马来西亚格式支持</p>
+        <p>🔧 特性：智能重复检测、HTML渲染、马来西亚格式支持、兼容性修复</p>
         <p>📊 监控端点：</p>
         <ul>
             <li><a href="/health">/health</a> - 健康检查</li>
@@ -553,15 +552,13 @@ def run_bot():
         # 添加错误处理器
         bot_application.add_error_handler(error_handler)
         
-        # 启动机器人
-        logger.info("Starting Telegram Bot v6.0...")
+        # 启动机器人 - 使用兼容的参数
+        logger.info("Starting Telegram Bot v6.1...")
         bot_application.run_polling(
             poll_interval=1.0,
             timeout=20,
             bootstrap_retries=3,
-            read_timeout=30,
-            write_timeout=30,
-            connect_timeout=30
+            drop_pending_updates=True
         )
         
     except Exception as e:
@@ -576,7 +573,7 @@ def main():
         logger.error("BOT_TOKEN environment variable not set")
         return
     
-    logger.info("Starting Phone Number Detection Bot v6.0 - Complete Fix")
+    logger.info("Starting Phone Number Detection Bot v6.1 - Compatibility Fix")
     
     try:
         # 启动Flask监控服务
