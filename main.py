@@ -4,6 +4,7 @@ import logging
 import threading
 import time
 import sys
+import traceback
 from datetime import datetime, timezone
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
@@ -137,7 +138,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uptime = calculate_uptime()
     
     welcome_message = f"""
-🎉 **电话号码查重机器人 v9.3** 🎉
+🎉 **电话号码查重机器人 v9.4** 🎉
 ═══════════════════════════
 
 👋 欢迎，{level_emoji} **{user.full_name}**！
@@ -149,7 +150,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 • 重复次数统计
 • 国家识别标识
 • 📊 完整统计功能
-• 🔄 自动重启保护
+• 🔄 强化自动重启
 
 📱 **使用方法：**
 直接发送电话号码给我，我会帮您检查是否重复！
@@ -273,6 +274,7 @@ async def check_phone_duplicate(update: Update, context: ContextTypes.DEFAULT_TY
         
     except Exception as e:
         logger.error(f"处理消息时出错: {e}")
+        logger.error(f"错误详情: {traceback.format_exc()}")
         await update.message.reply_text(
             "❌ 处理消息时出现错误，请稍后重试。",
             parse_mode='Markdown'
@@ -357,34 +359,42 @@ async def clear_database(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 def run_flask():
     """运行Flask服务器"""
-    app = Flask(__name__)
-    
-    @app.route('/')
-    def health_check():
-        uptime = calculate_uptime()
-        return f"Phone Bot v9.3 is alive! 🚀<br>Uptime: {uptime}<br>Restarts: {restart_count}", 200
-    
-    @app.route('/status')
-    def status():
-        return {
-            "status": "running",
-            "version": "9.3",
-            "uptime": calculate_uptime(),
-            "restart_count": restart_count,
-            "start_time": start_time.isoformat(),
-            "features": ["realtime_tracking", "duplicate_detection", "user_stats", "auto_restart", "full_statistics"]
-        }, 200
-    
-    @app.route('/health')
-    def health():
-        return {"healthy": True, "timestamp": datetime.now(timezone.utc).isoformat()}, 200
-    
-    port = int(os.environ.get('PORT', 10000))
-    app.run(host='0.0.0.0', port=port, debug=False, use_reloader=False)
+    try:
+        app = Flask(__name__)
+        
+        @app.route('/')
+        def health_check():
+            uptime = calculate_uptime()
+            return f"Phone Bot v9.4 is alive! 🚀<br>Uptime: {uptime}<br>Restarts: {restart_count}", 200
+        
+        @app.route('/status')
+        def status():
+            return {
+                "status": "running",
+                "version": "9.4",
+                "uptime": calculate_uptime(),
+                "restart_count": restart_count,
+                "start_time": start_time.isoformat(),
+                "features": ["realtime_tracking", "duplicate_detection", "user_stats", "auto_restart", "full_statistics"]
+            }, 200
+        
+        @app.route('/health')
+        def health():
+            return {"healthy": True, "timestamp": datetime.now(timezone.utc).isoformat()}, 200
+        
+        port = int(os.environ.get('PORT', 10000))
+        logger.info(f"Flask服务器启动，端口: {port}")
+        app.run(host='0.0.0.0', port=port, debug=False, use_reloader=False)
+        
+    except Exception as e:
+        logger.error(f"Flask服务器启动失败: {e}")
+        logger.error(f"Flask错误详情: {traceback.format_exc()}")
 
 def run_bot():
     """运行机器人主程序"""
     try:
+        logger.info("开始创建Telegram应用...")
+        
         # 创建Telegram应用
         application = Application.builder().token(BOT_TOKEN).build()
         
@@ -394,31 +404,54 @@ def run_bot():
         application.add_handler(CommandHandler("clear", clear_database))
         application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, check_phone_duplicate))
         
-        logger.info(f"电话号码查重机器人 v9.3 启动成功！重启次数: {restart_count}")
+        logger.info(f"电话号码查重机器人 v9.4 启动成功！重启次数: {restart_count}")
         
-        # 启动机器人
-        application.run_polling()
+        # 启动机器人，使用无限重试和心跳检测
+        logger.info("开始运行轮询...")
+        application.run_polling(
+            poll_interval=1.0,  # 轮询间隔1秒
+            timeout=20,         # 请求超时20秒
+            bootstrap_retries=5, # 启动重试5次
+            read_timeout=20,    # 读取超时20秒
+            write_timeout=20,   # 写入超时20秒
+            connect_timeout=20, # 连接超时20秒
+            pool_timeout=20     # 连接池超时20秒
+        )
+        
+        logger.warning("application.run_polling() 意外退出")
         
     except Exception as e:
         logger.error(f"Bot运行出错: {e}")
+        logger.error(f"Bot错误详情: {traceback.format_exc()}")
         raise e
 
 def main():
-    """主函数 - 带自动重启功能"""
+    """主函数 - 带强化自动重启功能"""
     global restart_count
     
-    max_restarts = 10  # 最大重启次数
-    restart_delay = 5   # 重启延迟秒数
+    max_restarts = 100  # 增加最大重启次数
+    base_restart_delay = 5   # 基础重启延迟秒数
+    
+    logger.info("=== 电话号码查重机器人 v9.4 启动 ===")
+    logger.info(f"启动时间: {format_datetime(start_time)}")
     
     # 启动Flask服务器
-    flask_thread = threading.Thread(target=run_flask, daemon=True)
-    flask_thread.start()
-    logger.info("Flask服务器已启动")
+    try:
+        flask_thread = threading.Thread(target=run_flask, daemon=True)
+        flask_thread.start()
+        logger.info("Flask服务器线程已启动")
+        time.sleep(2)  # 等待Flask启动
+    except Exception as e:
+        logger.error(f"Flask服务器启动失败: {e}")
     
+    # 主循环，带强化重启逻辑
     while restart_count < max_restarts:
         try:
+            logger.info(f"=== 第 {restart_count + 1} 次启动机器人 ===")
             run_bot()
-            # 如果正常退出，则跳出循环
+            
+            # 如果正常退出，记录并跳出循环
+            logger.warning("机器人正常退出，程序结束")
             break
             
         except KeyboardInterrupt:
@@ -427,21 +460,34 @@ def main():
             
         except Exception as e:
             restart_count += 1
-            logger.error(f"Bot异常停止 (第{restart_count}次): {e}")
+            logger.error(f"=== Bot异常停止 (第{restart_count}次) ===")
+            logger.error(f"异常类型: {type(e).__name__}")
+            logger.error(f"异常信息: {e}")
+            logger.error(f"异常详情: {traceback.format_exc()}")
             
             if restart_count >= max_restarts:
                 logger.error(f"达到最大重启次数 ({max_restarts})，程序终止")
                 sys.exit(1)
             
+            # 动态计算重启延迟，避免频繁重启
+            restart_delay = min(base_restart_delay * restart_count, 300)  # 最大延迟5分钟
+            
             logger.info(f"等待 {restart_delay} 秒后自动重启...")
-            time.sleep(restart_delay)
+            logger.info(f"重启进度: {restart_count}/{max_restarts}")
             
-            # 增加重启延迟，避免频繁重启
-            restart_delay = min(restart_delay * 2, 60)  # 最大延迟60秒
+            # 分段等待，每10秒输出一次进度
+            for i in range(0, restart_delay, 10):
+                remaining = restart_delay - i
+                if remaining >= 10:
+                    time.sleep(10)
+                    logger.info(f"距离重启还有 {remaining - 10} 秒...")
+                else:
+                    time.sleep(remaining)
+                    break
             
-            logger.info(f"正在进行第 {restart_count} 次自动重启...")
+            logger.info(f"=== 正在进行第 {restart_count} 次自动重启... ===")
     
-    logger.info("程序已退出")
+    logger.info("=== 程序已完全退出 ===")
 
 if __name__ == "__main__":
     main()
