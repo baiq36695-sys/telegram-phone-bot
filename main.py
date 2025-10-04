@@ -2,18 +2,23 @@
 # -*- coding: utf-8 -*-
 """
 HTML电话号码重复检测机器人
-版本: v7.1 - 终极稳定版
+版本: v7.1 - Render兼容版
 修复内容：
 1. 修复重复检测逻辑bug
 2. 解决线程问题
 3. 兼容性优化
+4. 添加HTTP端口支持（Render要求）
 """
 
 import logging
 import re
+import os
+import asyncio
 from html import unescape
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
+from aiohttp import web
+import threading
 
 # 配置日志
 logging.basicConfig(
@@ -58,7 +63,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """处理/start命令"""
     await update.message.reply_text(
         "📱 HTML电话号码重复检测机器人\n"
-        "🔧 版本: v7.1 - 终极稳定版\n\n"
+        "🔧 版本: v7.1 - Render兼容版\n\n"
         "功能说明：\n"
         "• 发送包含电话号码的文本，我会检测重复\n"
         "• 使用 /clear 清除所有记录\n"
@@ -68,14 +73,11 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def clear_data(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """清除所有存储的电话号码"""
-    chat_id = update.effective_chat.id
     context.user_data.clear()
     await update.message.reply_text("🗑️ 所有电话号码记录已清除！")
 
 async def show_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """显示统计信息"""
-    chat_id = update.effective_chat.id
-    
     if 'phones' not in context.user_data:
         await update.message.reply_text("📊 暂无记录数据")
         return
@@ -86,7 +88,6 @@ async def show_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def process_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """处理包含电话号码的消息"""
     try:
-        chat_id = update.effective_chat.id
         message_text = update.message.text
         
         # 初始化用户数据
@@ -143,10 +144,31 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
     """全局错误处理"""
     logger.error(f"Bot error: {context.error}")
 
-def main():
+# HTTP健康检查端点（Render要求）
+async def health_check(request):
+    """健康检查端点"""
+    return web.Response(text="Bot is running!", status=200)
+
+async def start_http_server():
+    """启动HTTP服务器"""
+    app = web.Application()
+    app.router.add_get('/', health_check)
+    app.router.add_get('/health', health_check)
+    
+    port = int(os.environ.get('PORT', 10000))
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, '0.0.0.0', port)
+    await site.start()
+    logger.info(f"HTTP服务器启动在端口 {port}")
+
+async def main():
     """主函数"""
     try:
-        # 创建应用
+        # 启动HTTP服务器
+        await start_http_server()
+        
+        # 创建Telegram应用
         application = Application.builder().token(BOT_TOKEN).build()
         
         # 添加处理器
@@ -158,13 +180,13 @@ def main():
         # 添加错误处理器
         application.add_error_handler(error_handler)
         
-        logger.info("机器人启动成功 - v7.1终极稳定版")
+        logger.info("机器人启动成功 - v7.1 Render兼容版")
         
-        # 直接在主线程运行，不使用timeout参数
-        application.run_polling()
+        # 启动机器人
+        await application.run_polling()
         
     except Exception as e:
         logger.error(f"Bot error: {e}")
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
