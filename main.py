@@ -2,12 +2,11 @@
 # -*- coding: utf-8 -*-
 """
 HTML电话号码重复检测机器人
-版本: v8.0 - 豪华美化版
+版本: v8.1 - 静默优化版
 增强功能：
-1. 丰富的视觉界面
-2. 动态表情和状态
-3. 详细的统计信息
-4. 更好的用户体验
+1. 简化日志输出（清爽控制台）
+2. 保留所有美化功能
+3. 更好的用户体验
 """
 
 import logging
@@ -20,11 +19,17 @@ from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 from flask import Flask
 
-# 配置日志
+# 配置简化的日志 - 只显示重要信息
 logging.basicConfig(
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=logging.INFO
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    level=logging.WARNING  # 只显示警告和错误，隐藏详细HTTP请求
 )
+
+# 进一步简化第三方库的日志
+logging.getLogger('httpx').setLevel(logging.WARNING)
+logging.getLogger('telegram').setLevel(logging.WARNING)
+logging.getLogger('urllib3').setLevel(logging.WARNING)
+
 logger = logging.getLogger(__name__)
 
 # 机器人Token - 请替换为您的实际Token
@@ -83,7 +88,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         📱 智能电话号码管理系统        
 🌟 ═══════════════════════════ 🌟
 
-🚀 版本: v8.0 - 豪华美化版
+🚀 版本: v8.1 - 静默优化版
 
 ✨ 【核心功能】
 🔍 智能识别电话号码
@@ -103,6 +108,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 🎭 智能表情，生动直观
 🌈 彩色界面，赏心悦目
 🔒 数据安全，隐私保护
+🤫 静默运行，控制台清爽
 
 ════════════════════════════════
 🎈 现在发送您的电话号码，开始体验吧！
@@ -168,6 +174,7 @@ async def show_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
    ✅ 运行正常
    ⚡ 响应迅速
    🛡️ 数据安全
+   🤫 静默运行
 
 ════════════════════════════════
 """
@@ -201,6 +208,7 @@ async def show_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
    • ⚡ 秒级重复检测
    • 🌈 可视化结果展示
    • 🔒 隐私数据保护
+   • 🤫 静默运行模式
 
 ════════════════════════════════
 """
@@ -213,7 +221,7 @@ async def show_about(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 🤖 【机器人信息】
    名称：智能电话号码管理系统
-   版本：v8.0 豪华美化版
+   版本：v8.1 静默优化版
    开发：MiniMax Agent
 
 ⭐ 【核心技术】
@@ -233,6 +241,12 @@ async def show_about(update: Update, context: ContextTypes.DEFAULT_TYPE):
    • 清晰结构布局
    • 动态视觉反馈
    • 个性化体验
+
+🆕 【v8.1新特性】
+   • 🤫 静默运行模式
+   • 🧹 清爽控制台输出
+   • ⚡ 优化响应速度
+   • 🛡️ 增强稳定性
 
 💌 感谢使用！如有建议，欢迎反馈！
 
@@ -353,6 +367,10 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
 # Flask应用（用于健康检查）
 app = Flask(__name__)
 
+# 禁用Flask的访问日志
+log = logging.getLogger('werkzeug')
+log.setLevel(logging.ERROR)
+
 @app.route('/')
 @app.route('/health')
 def health_check():
@@ -360,11 +378,12 @@ def health_check():
     return """
     <html>
     <head><title>📱 电话号码管理机器人</title></head>
-    <body style="font-family: Arial; text-align: center; padding: 50px;">
+    <body style="font-family: Arial; text-align: center; padding: 50px; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white;">
         <h1>🤖 机器人运行正常！</h1>
-        <p>✅ 版本: v8.0 豪华美化版</p>
+        <p>✅ 版本: v8.1 静默优化版</p>
         <p>⚡ 状态: 在线服务中</p>
         <p>🌟 功能: 智能电话号码管理</p>
+        <p>🤫 模式: 静默运行</p>
     </body>
     </html>
     """, 200
@@ -380,7 +399,7 @@ def main():
         # 在后台线程启动Flask服务器
         flask_thread = threading.Thread(target=run_flask, daemon=True)
         flask_thread.start()
-        logger.info(f"🌐 Flask服务器启动在端口 {os.environ.get('PORT', 10000)}")
+        print(f"🤫 系统启动中... 端口: {os.environ.get('PORT', 10000)}")
         
         # 创建Telegram应用
         application = Application.builder().token(BOT_TOKEN).build()
@@ -396,7 +415,8 @@ def main():
         # 添加错误处理器
         application.add_error_handler(error_handler)
         
-        logger.info("🚀 机器人启动成功 - v8.0 豪华美化版")
+        print("🚀 机器人启动成功 - v8.1 静默优化版")
+        print("🤫 静默模式：控制台将保持清爽")
         
         # 启动机器人（主线程）
         application.run_polling()
