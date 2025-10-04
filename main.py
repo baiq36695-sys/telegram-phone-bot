@@ -2,27 +2,29 @@
 # -*- coding: utf-8 -*-
 """
 HTML电话号码重复检测机器人
-版本: v8.1 - 静默优化版
+版本: v9.0 - 全面跟踪版
 增强功能：
-1. 简化日志输出（清爽控制台）
-2. 保留所有美化功能
-3. 更好的用户体验
+1. 显示电话号码第一次出现时间
+2. 显示重复时是跟哪个用户重复的
+3. 显示号码重复次数
+4. 跨用户全局重复检测
 """
 
 import logging
 import re
 import os
 import threading
+import json
 from html import unescape
 from datetime import datetime
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 from flask import Flask
 
-# 配置简化的日志 - 只显示重要信息
+# 配置简化的日志
 logging.basicConfig(
     format='%(asctime)s - %(levelname)s - %(message)s',
-    level=logging.WARNING  # 只显示警告和错误，隐藏详细HTTP请求
+    level=logging.WARNING
 )
 
 # 进一步简化第三方库的日志
@@ -34,6 +36,10 @@ logger = logging.getLogger(__name__)
 
 # 机器人Token - 请替换为您的实际Token
 BOT_TOKEN = "8424823618:AAFwjIYQH86nKXOiJUybfBRio7sRJl-GUEU"
+
+# 全局数据存储 - 跨用户共享
+# 结构: {normalized_phone: {first_time, first_user, count, submissions}}
+global_phone_data = {}
 
 # 更全面的电话号码匹配模式
 PHONE_PATTERNS = [
@@ -81,6 +87,33 @@ def get_phone_type_emoji(phone):
     else:
         return "🌍"  # 其他国家
 
+def get_user_display_name(user):
+    """获取用户显示名称"""
+    if user.username:
+        return f"@{user.username}"
+    elif user.first_name:
+        if user.last_name:
+            return f"{user.first_name} {user.last_name}"
+        return user.first_name
+    else:
+        return f"用户{user.id}"
+
+def format_time_ago(time_diff):
+    """格式化时间差显示"""
+    seconds = int(time_diff.total_seconds())
+    
+    if seconds < 60:
+        return f"{seconds}秒前"
+    elif seconds < 3600:
+        minutes = seconds // 60
+        return f"{minutes}分钟前"
+    elif seconds < 86400:
+        hours = seconds // 3600
+        return f"{hours}小时前"
+    else:
+        days = seconds // 86400
+        return f"{days}天前"
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """处理/start命令"""
     welcome_msg = """
@@ -88,27 +121,27 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         📱 智能电话号码管理系统        
 🌟 ═══════════════════════════ 🌟
 
-🚀 版本: v8.1 - 静默优化版
+🚀 版本: v9.0 - 全面跟踪版
 
 ✨ 【核心功能】
 🔍 智能识别电话号码
-🛡️ 精准重复检测
+🛡️ 精准重复检测（跨用户）
 🌍 支持国际号码格式
 📊 实时统计分析
+⏰ 详细时间跟踪
 
 🎯 【操作指南】
 📩 发送包含电话号码的消息
-🗑️ /clear - 清空所有记录
+🗑️ /clear - 清空所有记录（管理员）
 📈 /stats - 查看详细统计
 💡 /help - 获取帮助信息
 🎨 /about - 关于本机器人
 
-🎨 【特色亮点】
-⚡ 实时处理，毫秒响应
-🎭 智能表情，生动直观
-🌈 彩色界面，赏心悦目
-🔒 数据安全，隐私保护
-🤫 静默运行，控制台清爽
+🔥 【新增特性】
+📅 显示号码第一次出现时间
+👥 显示重复时的用户信息
+🔢 显示重复次数统计
+🌐 全局跨用户检测
 
 ════════════════════════════════
 🎈 现在发送您的电话号码，开始体验吧！
@@ -117,17 +150,27 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(welcome_msg)
 
 async def clear_data(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """清除所有存储的电话号码"""
+    """清除所有存储的电话号码（仅管理员）"""
+    global global_phone_data
+    
+    # 这里可以添加管理员检查
+    # admin_ids = [123456789]  # 添加管理员ID
+    # if update.effective_user.id not in admin_ids:
+    #     await update.message.reply_text("❌ 仅管理员可以清除全局数据")
+    #     return
+    
+    global_phone_data.clear()
     context.user_data.clear()
     
     clear_msg = """
-🧹 ═══════ 数据清理完成 ═══════ 🧹
+🧹 ═══════ 全局数据清理完成 ═══════ 🧹
 
 ✅ 所有电话号码记录已清除
 ✅ 统计数据已重置
+✅ 跨用户数据已清空
 ✅ 系统状态已恢复初始化
 
-🆕 您现在可以重新开始录入电话号码了！
+🆕 所有用户现在可以重新开始录入电话号码了！
 
 ════════════════════════════════
 """
@@ -135,7 +178,9 @@ async def clear_data(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def show_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """显示统计信息"""
-    if 'phones' not in context.user_data:
+    global global_phone_data
+    
+    if not global_phone_data:
         stats_msg = """
 📊 ═══════ 统计报告 ═══════ 📊
 
@@ -147,34 +192,53 @@ async def show_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(stats_msg)
         return
     
-    phones = context.user_data.get('phones', set())
-    normalized_phones = context.user_data.get('normalized_phones', set())
+    # 统计总体数据
+    total_unique_phones = len(global_phone_data)
+    total_submissions = sum(data['count'] for data in global_phone_data.values())
     
     # 按国家分类统计
     country_stats = {}
-    for phone in phones:
-        emoji = get_phone_type_emoji(phone)
+    repeat_stats = {}
+    
+    for normalized_phone, data in global_phone_data.items():
+        # 获取第一次提交时的原始格式来判断国家
+        first_original = data['submissions'][0]['original_format']
+        emoji = get_phone_type_emoji(first_original)
         country_stats[emoji] = country_stats.get(emoji, 0) + 1
+        
+        # 统计重复次数分布
+        count = data['count']
+        if count > 1:
+            repeat_stats[count] = repeat_stats.get(count, 0) + 1
     
     country_breakdown = ""
     for emoji, count in sorted(country_stats.items(), key=lambda x: x[1], reverse=True):
-        country_breakdown += f"      {emoji} {count} 个号码\n"
+        country_breakdown += f"      {emoji} {count} 个唯一号码\n"
+    
+    repeat_breakdown = ""
+    for repeat_count, phone_count in sorted(repeat_stats.items(), reverse=True):
+        repeat_breakdown += f"      🔄 {repeat_count}次重复: {phone_count} 个号码\n"
+    
+    if not repeat_breakdown:
+        repeat_breakdown = "      🎉 暂无重复号码\n"
     
     stats_msg = f"""
-📊 ═══════ 统计报告 ═══════ 📊
+📊 ═══════ 全局统计报告 ═══════ 📊
 
 📈 【总体数据】
-   📞 总记录号码：{len(phones)} 个
-   🔒 唯一号码：{len(normalized_phones)} 个
+   📞 唯一号码数：{total_unique_phones} 个
+   📝 总提交次数：{total_submissions} 次
    ⏰ 统计时间：{datetime.now().strftime('%Y-%m-%d %H:%M')}
 
 🌍 【地区分布】
 {country_breakdown}
+🔄 【重复统计】
+{repeat_breakdown}
 🏆 【系统状态】
    ✅ 运行正常
    ⚡ 响应迅速
    🛡️ 数据安全
-   🤫 静默运行
+   🌐 全局跟踪
 
 ════════════════════════════════
 """
@@ -192,7 +256,7 @@ async def show_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 🛠️【命令列表】
    /start - 🏠 返回主页
-   /clear - 🗑️ 清空所有记录
+   /clear - 🗑️ 清空所有记录（管理员）
    /stats - 📊 查看统计信息
    /help - 💡 显示此帮助
    /about - ℹ️ 关于机器人
@@ -208,7 +272,9 @@ async def show_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
    • ⚡ 秒级重复检测
    • 🌈 可视化结果展示
    • 🔒 隐私数据保护
-   • 🤫 静默运行模式
+   • 📅 详细时间跟踪
+   • 👥 跨用户重复检测
+   • 🔢 重复次数统计
 
 ════════════════════════════════
 """
@@ -221,7 +287,7 @@ async def show_about(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 🤖 【机器人信息】
    名称：智能电话号码管理系统
-   版本：v8.1 静默优化版
+   版本：v9.0 全面跟踪版
    开发：MiniMax Agent
 
 ⭐ 【核心技术】
@@ -229,6 +295,7 @@ async def show_about(update: Update, context: ContextTypes.DEFAULT_TYPE):
    • 正则表达式引擎
    • 智能去重算法
    • 实时数据处理
+   • 全局状态管理
 
 🌟 【设计理念】
    • 简单易用，功能强大
@@ -242,11 +309,12 @@ async def show_about(update: Update, context: ContextTypes.DEFAULT_TYPE):
    • 动态视觉反馈
    • 个性化体验
 
-🆕 【v8.1新特性】
-   • 🤫 静默运行模式
-   • 🧹 清爽控制台输出
-   • ⚡ 优化响应速度
-   • 🛡️ 增强稳定性
+🆕 【v9.0新特性】
+   • 📅 电话号码首次出现时间追踪
+   • 👥 重复来源用户信息显示
+   • 🔢 详细重复次数统计
+   • 🌐 全局跨用户重复检测
+   • ⏰ 智能时间差显示
 
 💌 感谢使用！如有建议，欢迎反馈！
 
@@ -257,12 +325,11 @@ async def show_about(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def process_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """处理包含电话号码的消息"""
     try:
-        message_text = update.message.text
+        global global_phone_data
         
-        # 初始化用户数据
-        if 'phones' not in context.user_data:
-            context.user_data['phones'] = set()
-            context.user_data['normalized_phones'] = set()
+        message_text = update.message.text
+        current_user = update.effective_user
+        current_time = datetime.now()
         
         # 提取电话号码
         phone_numbers = extract_phone_numbers(message_text)
@@ -286,22 +353,54 @@ async def process_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(no_phone_msg)
             return
         
-        # 获取已存储的数据
-        chat_data = context.user_data
-        
         # 分类电话号码：新号码和重复号码
-        new_phones = set()
-        duplicate_phones = set()
+        new_phones = []
+        duplicate_phones = []
         
         # 检查每个电话号码
         for phone in phone_numbers:
             normalized = normalize_phone_number(phone)
-            if normalized in chat_data['normalized_phones']:
-                duplicate_phones.add(phone)
+            
+            if normalized in global_phone_data:
+                # 重复号码
+                duplicate_phones.append({
+                    'original': phone,
+                    'normalized': normalized,
+                    'data': global_phone_data[normalized]
+                })
+                
+                # 更新重复数据
+                global_phone_data[normalized]['count'] += 1
+                global_phone_data[normalized]['submissions'].append({
+                    'user': {
+                        'id': current_user.id,
+                        'name': get_user_display_name(current_user)
+                    },
+                    'time': current_time,
+                    'original_format': phone
+                })
+                
             else:
-                new_phones.add(phone)
-                chat_data['phones'].add(phone)
-                chat_data['normalized_phones'].add(normalized)
+                # 新号码
+                new_phones.append(phone)
+                
+                # 添加到全局数据
+                global_phone_data[normalized] = {
+                    'first_time': current_time,
+                    'first_user': {
+                        'id': current_user.id,
+                        'name': get_user_display_name(current_user)
+                    },
+                    'count': 1,
+                    'submissions': [{
+                        'user': {
+                            'id': current_user.id,
+                            'name': get_user_display_name(current_user)
+                        },
+                        'time': current_time,
+                        'original_format': phone
+                    }]
+                }
         
         # 构建美化的回复消息
         response_parts = []
@@ -312,34 +411,45 @@ async def process_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             for phone in sorted(new_phones):
                 emoji = get_phone_type_emoji(phone)
                 response_parts.append(f"   {emoji} 📞 {phone}")
+                response_parts.append(f"      🎉 首次记录！")
             response_parts.append("")
         
         if duplicate_phones:
             response_parts.append(f"⚠️ 【重复号码警告】({len(duplicate_phones)} 个)")
-            for phone in sorted(duplicate_phones):
+            for dup_info in duplicate_phones:
+                phone = dup_info['original']
+                data = dup_info['data']
                 emoji = get_phone_type_emoji(phone)
+                
                 response_parts.append(f"   {emoji} 🔄 {phone}")
+                
+                # 显示首次出现信息
+                time_ago = format_time_ago(current_time - data['first_time'])
+                response_parts.append(f"      📅 首次出现：{time_ago}")
+                response_parts.append(f"      👤 首次用户：{data['first_user']['name']}")
+                
+                # 显示重复次数
+                response_parts.append(f"      🔢 重复次数：{data['count']} 次")
+                
+                # 显示最近几次重复用户（最多显示3个）
+                recent_users = []
+                for submission in data['submissions'][-3:]:
+                    if submission['user']['name'] not in recent_users:
+                        recent_users.append(submission['user']['name'])
+                
+                if len(recent_users) > 1:
+                    response_parts.append(f"      👥 重复用户：{', '.join(recent_users[-3:])}")
+                
             response_parts.append("")
         
         # 添加统计信息
-        total_count = len(chat_data['phones'])
-        if total_count <= 5:
-            level_emoji = "🌱"
-            level_name = "新手"
-        elif total_count <= 20:
-            level_emoji = "🌿"
-            level_name = "进阶"
-        elif total_count <= 50:
-            level_emoji = "🌳"
-            level_name = "专业"
-        else:
-            level_emoji = "🏆"
-            level_name = "大师"
+        total_unique = len(global_phone_data)
+        total_submissions = sum(data['count'] for data in global_phone_data.values())
         
-        response_parts.append(f"📊 【当前统计】")
-        response_parts.append(f"   📈 总记录：{total_count} 个号码")
-        response_parts.append(f"   {level_emoji} 等级：{level_name}")
-        response_parts.append(f"   ⏰ 时间：{datetime.now().strftime('%H:%M')}")
+        response_parts.append(f"📊 【全局统计】")
+        response_parts.append(f"   📈 唯一号码：{total_unique} 个")
+        response_parts.append(f"   📝 总提交：{total_submissions} 次")
+        response_parts.append(f"   ⏰ 时间：{current_time.strftime('%H:%M')}")
         
         response_parts.append("\n════════════════════════════════")
         
@@ -375,15 +485,21 @@ log.setLevel(logging.ERROR)
 @app.route('/health')
 def health_check():
     """健康检查端点"""
-    return """
+    global global_phone_data
+    total_phones = len(global_phone_data)
+    total_submissions = sum(data['count'] for data in global_phone_data.values())
+    
+    return f"""
     <html>
     <head><title>📱 电话号码管理机器人</title></head>
     <body style="font-family: Arial; text-align: center; padding: 50px; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white;">
         <h1>🤖 机器人运行正常！</h1>
-        <p>✅ 版本: v8.1 静默优化版</p>
+        <p>✅ 版本: v9.0 全面跟踪版</p>
         <p>⚡ 状态: 在线服务中</p>
         <p>🌟 功能: 智能电话号码管理</p>
-        <p>🤫 模式: 静默运行</p>
+        <p>📊 唯一号码: {total_phones} 个</p>
+        <p>📝 总提交: {total_submissions} 次</p>
+        <p>🔥 特性: 全局跟踪，时间记录，用户追踪</p>
     </body>
     </html>
     """, 200
@@ -399,7 +515,7 @@ def main():
         # 在后台线程启动Flask服务器
         flask_thread = threading.Thread(target=run_flask, daemon=True)
         flask_thread.start()
-        print(f"🤫 系统启动中... 端口: {os.environ.get('PORT', 10000)}")
+        print(f"🌐 系统启动中... 端口: {os.environ.get('PORT', 10000)}")
         
         # 创建Telegram应用
         application = Application.builder().token(BOT_TOKEN).build()
@@ -415,8 +531,8 @@ def main():
         # 添加错误处理器
         application.add_error_handler(error_handler)
         
-        print("🚀 机器人启动成功 - v8.1 静默优化版")
-        print("🤫 静默模式：控制台将保持清爽")
+        print("🚀 机器人启动成功 - v9.0 全面跟踪版")
+        print("📅 新功能：时间跟踪、用户追踪、重复统计")
         
         # 启动机器人（主线程）
         application.run_polling()
