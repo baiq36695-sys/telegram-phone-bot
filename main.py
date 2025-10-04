@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
 """
-电话号码重复检测机器人 - 超级清洁版
-完全移除HTTP组件，只保留纯Telegram Bot功能
-解决setWebhook循环请求问题
+电话号码重复检测机器人 - 修复版
+兼容旧版本python-telegram-bot库
 """
 
 import os
@@ -328,7 +327,7 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ 处理请求时发生错误，请稍后重试")
 
 async def run_bot():
-    """运行Telegram机器人 - 超级清洁版"""
+    """运行Telegram机器人 - 兼容版"""
     global bot_application, is_running
     
     bot_token = os.environ.get('TELEGRAM_BOT_TOKEN')
@@ -337,7 +336,7 @@ async def run_bot():
         return
     
     try:
-        logger.info("🚀 启动超级清洁版机器人...")
+        logger.info("🚀 启动兼容版机器人...")
         
         # 创建Application实例
         bot_application = Application.builder().token(bot_token).build()
@@ -358,16 +357,11 @@ async def run_bot():
         logger.info("✅ 机器人已启动，使用轮询模式")
         logger.info("✅ 自动重启功能已激活")
         
-        # 使用轮询模式，避免webhook冲突
+        # 使用简单的轮询模式参数 - 兼容旧版本
         await bot_application.run_polling(
             drop_pending_updates=True,
             close_loop=False,
-            stop_signals=None,
-            timeout=30,
-            read_timeout=30,
-            write_timeout=30,
-            connect_timeout=30,
-            pool_timeout=30
+            stop_signals=None
         )
         
     except Exception as e:
@@ -419,15 +413,16 @@ def signal_handler(signum, frame):
     restart_application()
 
 def main():
-    """主函数 - 超级清洁版"""
+    """主函数 - 兼容版"""
     global RESTART_COUNT
     
     logger.info("=" * 60)
-    logger.info(f"📱 电话号码检测机器人 - 超级清洁版 (重启次数: {RESTART_COUNT})")
+    logger.info(f"📱 电话号码检测机器人 - 兼容版 (重启次数: {RESTART_COUNT})")
     logger.info("✅ 自动重启功能：已启用")
     logger.info("✅ HTTP服务器：已完全移除")
     logger.info("✅ Webhook模式：已禁用")
     logger.info("✅ 轮询模式：已启用")
+    logger.info("✅ 库兼容性：修复超时参数错误")
     logger.info("=" * 60)
     
     # 设置信号处理
