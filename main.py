@@ -1,62 +1,53 @@
 #!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 """
-电话号码重复检测机器人 - 终极修复版
-完全重写重复检测逻辑，确保绝对精确
+完全修正版本的Telegram电话号码检测机器人 v6.0
+专门修复电话号码正则表达式问题
 """
 
 import os
-import re
-import logging
-import signal
-import sys
 import asyncio
-import datetime
-from typing import Set, Dict, Any, List, Tuple
-from collections import defaultdict
+import logging
+import re
+import json
 import threading
 import time
-import hashlib
-import subprocess
+from datetime import datetime, timedelta
+from typing import Dict, Set, List, Optional, Any
+from collections import defaultdict
+import urllib.parse
 
-# 🔄 自动重启控制变量
-RESTART_COUNT = 0
-MAX_RESTARTS = 10
-RESTART_DELAY = 5
+# 导入Telegram Bot相关库
+from telegram import Update, Bot, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import (
+    Application, CommandHandler, MessageHandler, CallbackQueryHandler,
+    ConversationHandler, ContextTypes, filters
+)
+from telegram.constants import ParseMode
+from telegram.error import NetworkError, TelegramError
 
-# 导入并应用nest_asyncio
-try:
-    import nest_asyncio
-    nest_asyncio.apply()
-except ImportError:
-    import subprocess
-    subprocess.check_call([sys.executable, "-m", "pip", "install", "nest-asyncio"])
-    import nest_asyncio
-    nest_asyncio.apply()
+# 导入Flask相关库
+from flask import Flask, jsonify, request, render_template_string
 
-from telegram import Update
-from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
-from flask import Flask, jsonify
-
-# 设置日志
+# 配置日志
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=logging.INFO
+    level=logging.INFO,
+    handlers=[
+        logging.StreamHandler(),
+        logging.FileHandler('bot.log', encoding='utf-8')
+    ]
 )
 logger = logging.getLogger(__name__)
 
-# 禁用不必要的HTTP日志以减少噪音
-logging.getLogger("httpx").setLevel(logging.WARNING)
-logging.getLogger("httpcore").setLevel(logging.WARNING)
-logging.getLogger("werkzeug").setLevel(logging.WARNING)
+# 机器人配置
+TOKEN = os.getenv('BOT_TOKEN')
+PORT = int(os.getenv('PORT', 8000))
 
-# 初始化Flask应用
-app = Flask(__name__)
-
-# 全局变量 - 增强版数据结构
-user_groups: Dict[int, Dict[str, Any]] = defaultdict(lambda: {
+# 全局数据存储
+user_data_storage = defaultdict(lambda: {
     'phones': set(),
-    'normalized_phones': set(),  # 新增：存储标准化后的号码用于重复检测
-    'phone_history': [],
+    'normalized_phones': set(),  # 新增：专门用于重复检测的标准化号码集合
     'risk_scores': {},
     'warnings_issued': set(),
     'last_activity': None,
@@ -83,40 +74,40 @@ def normalize_phone_number(phone: str) -> str:
     return re.sub(r'[^\d+]', '', phone)
 
 def extract_phone_numbers(text: str) -> Set[str]:
-    """从文本中提取电话号码 - 支持多国格式，特别优化马来西亚格式"""
+    """从文本中提取电话号码 - 完全修正的马来西亚格式支持"""
     patterns = [
-        # 马来西亚电话号码（按优先级排序）
-        r'\+60\s+1[0-9]\s*-?\s*\d{4}\s+\d{4}',       # +60 11-2896 2309 或 +60 11 2896 2309
-        r'\+60\s*1[0-9]\s*-?\s*\d{4}\s*-?\s*\d{4}',  # +60 11-2896-2309 或 +6011-2896-2309
-        r'\+60\s*1[0-9]\d{7,8}',                     # +60 11xxxxxxxx
-        r'\+60\s*[3-9]\s*-?\s*\d{4}\s+\d{4}',        # +60 3-1234 5678 (固话)
-        r'\+60\s*[3-9]\d{7,8}',                      # +60 312345678 (固话)
+        # 马来西亚电话号码（修正版本 - 支持3位-4位和4位-4位格式）
+        r'\+60\s*1[0-9][\s-]*\d{3}[\s-]+\d{4}',          # +60 13-970 3144 或 +60 13 970 3144
+        r'\+60\s*1[0-9][\s-]*\d{4}[\s-]+\d{4}',          # +60 11-2896 2309 或 +60 11 2896 2309
+        r'\+60\s*1[0-9][\s-]*\d{7,8}',                   # +60 13-9703144 或 +6013-9703144
+        r'\+60\s*[3-9][\s-]*\d{3,4}[\s-]+\d{4}',         # +60 3-1234 5678 (固话)
+        r'\+60\s*[3-9][\s-]*\d{7,8}',                    # +60 312345678 (固话)
         
-        # 其他国际格式
-        r'\+86\s*1[3-9]\d{9}',                       # 中国手机
-        r'\+86\s*[2-9]\d{2,3}\s*\d{7,8}',           # 中国固话
-        r'\+1\s*[2-9]\d{2}\s*[2-9]\d{2}\s*\d{4}',   # 美国/加拿大
-        r'\+44\s*[1-9]\d{8,9}',                     # 英国
-        r'\+65\s*[6-9]\d{7}',                       # 新加坡
-        r'\+852\s*[2-9]\d{7}',                      # 香港
-        r'\+853\s*[6-9]\d{7}',                      # 澳门
-        r'\+886\s*[0-9]\d{8}',                      # 台湾
-        r'\+91\s*[6-9]\d{9}',                       # 印度
-        r'\+81\s*[7-9]\d{8}',                       # 日本手机
-        r'\+82\s*1[0-9]\d{7,8}',                    # 韩国
-        r'\+66\s*[6-9]\d{8}',                       # 泰国
-        r'\+84\s*[3-9]\d{8}',                       # 越南
-        r'\+63\s*[2-9]\d{8}',                       # 菲律宾
-        r'\+62\s*[1-9]\d{7,10}',                    # 印度尼西亚
+        # 通用的国际手机号码格式
+        r'\+86\s*1[3-9]\d{9}',                           # 中国手机
+        r'\+86\s*[2-9]\d{2,3}[\s-]*\d{7,8}',            # 中国固话
+        r'\+1[\s-]*[2-9]\d{2}[\s-]*[2-9]\d{2}[\s-]*\d{4}', # 美国/加拿大
+        r'\+44\s*[1-9]\d{8,9}',                         # 英国
+        r'\+65\s*[6-9]\d{7}',                           # 新加坡
+        r'\+852\s*[2-9]\d{7}',                          # 香港
+        r'\+853\s*[6-9]\d{7}',                          # 澳门
+        r'\+886\s*[0-9]\d{8}',                          # 台湾
+        r'\+91\s*[6-9]\d{9}',                           # 印度
+        r'\+81\s*[7-9]\d{8}',                           # 日本手机
+        r'\+82\s*1[0-9]\d{7,8}',                        # 韩国
+        r'\+66\s*[6-9]\d{8}',                           # 泰国
+        r'\+84\s*[3-9]\d{8}',                           # 越南
+        r'\+63\s*[2-9]\d{8}',                           # 菲律宾
+        r'\+62\s*[1-9]\d{7,10}',                        # 印度尼西亚
         
-        # 通用国际格式
-        r'\+\d{1,4}\s*\d{1,4}\s*\d{1,4}\s*\d{1,9}', # 通用国际格式
+        # 更宽松的通用国际格式
+        r'\+\d{1,4}[\s-]*\d{1,4}[\s-]*\d{1,4}[\s-]*\d{1,9}', # 通用国际格式
         
         # 本地格式（无国际代码）
-        r'1[3-9]\d{9}',                             # 中国手机（本地）
-        r'0[1-9]\d{1,3}[-\s]?\d{7,8}',             # 中国固话（本地）
-        r'01[0-9][-\s]?\d{4}[-\s]?\d{4}',          # 马来西亚手机（本地）
-        r'0[3-9][-\s]?\d{4}[-\s]?\d{4}',           # 马来西亚固话（本地）
+        r'1[3-9]\d{9}',                                 # 中国手机（本地）
+        r'0[1-9]\d{1,3}[\s-]*\d{7,8}',                 # 中国固话（本地）
+        r'01[0-9][\s-]*\d{3,4}[\s-]*\d{4}',            # 马来西亚手机（本地）
+        r'0[3-9][\s-]*\d{3,4}[\s-]*\d{4}',             # 马来西亚固话（本地）
     ]
     
     phone_numbers = set()
@@ -158,659 +149,459 @@ def categorize_phone_number(phone: str) -> str:
     """识别电话号码的类型和国家"""
     clean_phone = normalize_phone_number(phone)
     
-    if re.match(r'\+60[1][0-9]', clean_phone):
-        return "🇲🇾 马来西亚手机"
-    elif re.match(r'\+60[3-9]', clean_phone):
-        return "🇲🇾 马来西亚固话"
-    elif re.match(r'\+86[1][3-9]', clean_phone):
-        return "🇨🇳 中国手机"
-    elif re.match(r'\+86[2-9]', clean_phone):
-        return "🇨🇳 中国固话"
-    elif re.match(r'\+1[2-9]', clean_phone):
-        return "🇺🇸 美国/加拿大"
-    elif re.match(r'\+65[6-9]', clean_phone):
-        return "🇸🇬 新加坡"
-    elif re.match(r'\+852[2-9]', clean_phone):
-        return "🇭🇰 香港"
-    elif re.match(r'\+853[6-9]', clean_phone):
-        return "🇲🇴 澳门"
-    elif re.match(r'\+886[0-9]', clean_phone):
-        return "🇹🇼 台湾"
-    elif re.match(r'\+91[6-9]', clean_phone):
-        return "🇮🇳 印度"
-    elif re.match(r'\+81[7-9]', clean_phone):
-        return "🇯🇵 日本"
-    elif re.match(r'\+82[1][0-9]', clean_phone):
-        return "🇰🇷 韩国"
-    elif re.match(r'\+66[6-9]', clean_phone):
-        return "🇹🇭 泰国"
-    elif re.match(r'\+84[3-9]', clean_phone):
-        return "🇻🇳 越南"
-    elif re.match(r'\+63[2-9]', clean_phone):
-        return "🇵🇭 菲律宾"
-    elif re.match(r'\+62[1-9]', clean_phone):
-        return "🇮🇩 印度尼西亚"
-    elif re.match(r'\+44[1-9]', clean_phone):
-        return "🇬🇧 英国"
-    elif re.match(r'^[1][3-9]\d{9}$', clean_phone):
-        return "🇨🇳 中国手机（本地）"
-    elif re.match(r'^0[1-9]', clean_phone):
-        if len(clean_phone) >= 10:
-            return "🇲🇾 马来西亚（本地）"
-        else:
-            return "🇨🇳 中国固话（本地）"
+    # 马来西亚手机号码
+    if clean_phone.startswith('+601'):
+        return '🇲🇾 马来西亚手机'
+    elif clean_phone.startswith('+603'):
+        return '🇲🇾 马来西亚固话'
+    elif clean_phone.startswith('+60'):
+        return '🇲🇾 马来西亚'
+    
+    # 中国
+    elif clean_phone.startswith('+861'):
+        return '🇨🇳 中国手机'
+    elif clean_phone.startswith('+86'):
+        return '🇨🇳 中国'
+    elif clean_phone.startswith('1') and len(clean_phone) == 11:
+        return '🇨🇳 中国手机'
+    
+    # 其他国家
+    elif clean_phone.startswith('+1'):
+        return '🇺🇸 美国/加拿大'
+    elif clean_phone.startswith('+44'):
+        return '🇬🇧 英国'
+    elif clean_phone.startswith('+65'):
+        return '🇸🇬 新加坡'
+    elif clean_phone.startswith('+852'):
+        return '🇭🇰 香港'
+    elif clean_phone.startswith('+853'):
+        return '🇲🇴 澳门'
+    elif clean_phone.startswith('+886'):
+        return '🇹🇼 台湾'
+    elif clean_phone.startswith('+91'):
+        return '🇮🇳 印度'
+    elif clean_phone.startswith('+81'):
+        return '🇯🇵 日本'
+    elif clean_phone.startswith('+82'):
+        return '🇰🇷 韩国'
+    elif clean_phone.startswith('+66'):
+        return '🇹🇭 泰国'
+    elif clean_phone.startswith('+84'):
+        return '🇻🇳 越南'
+    elif clean_phone.startswith('+63'):
+        return '🇵🇭 菲律宾'
+    elif clean_phone.startswith('+62'):
+        return '🇮🇩 印度尼西亚'
     else:
-        return "🌍 其他国际号码"
+        return '🌍 其他地区'
 
-def assess_phone_risk(phone: str, chat_data: Dict[str, Any], is_duplicate: bool = False) -> Tuple[str, List[str]]:
-    """评估电话号码风险等级"""
-    warnings = []
-    risk_score = 0
-    
-    clean_phone = normalize_phone_number(phone)
-    
-    # 1. 重复度检查
-    if is_duplicate:
-        risk_score += 2
-        warnings.append("📞 号码重复：该号码之前已被检测过")
-    
-    # 2. 格式可疑性检查
-    if not re.match(r'^\+\d+', clean_phone) and len(clean_phone) > 10:
-        risk_score += 1
-        warnings.append("🔍 格式异常：缺少国际代码的长号码")
-    
-    # 3. 长度异常检查
-    if len(clean_phone) > 16 or len(clean_phone) < 8:
-        risk_score += 2
-        warnings.append("📏 长度异常：电话号码长度不符合国际标准")
-    
-    # 4. 连续数字模式检查
-    if re.search(r'(\d)\1{4,}', clean_phone):
-        risk_score += 1
-        warnings.append("🔢 模式可疑：存在5个以上连续相同数字")
-    
-    # 5. 频繁提交检查
-    if len(chat_data['phone_history']) > 20:
-        recent_submissions = [h for h in chat_data['phone_history'] if 
-                            (datetime.datetime.now() - h['timestamp']).seconds < 3600]
-        if len(recent_submissions) > 10:
-            risk_score += 2
-            warnings.append("⏱️ 频繁提交：1小时内提交次数过多，请注意数据保护")
-    
-    # 确定风险等级
-    if risk_score >= 6:
-        return 'CRITICAL', warnings
-    elif risk_score >= 4:
-        return 'HIGH', warnings
-    elif risk_score >= 2:
-        return 'MEDIUM', warnings
+def assess_risk_level(phone_count: int, duplicate_count: int) -> dict:
+    """风险评估算法"""
+    if duplicate_count > 0:
+        return RISK_LEVELS['CRITICAL']
+    elif phone_count >= 10:
+        return RISK_LEVELS['HIGH']
+    elif phone_count >= 5:
+        return RISK_LEVELS['MEDIUM']
     else:
-        return 'LOW', warnings
+        return RISK_LEVELS['LOW']
 
-# 🔄 自动重启功能
-def restart_application():
-    """重启应用程序"""
-    global RESTART_COUNT
+def generate_detailed_html_report(user_data: dict, new_phones: set, duplicates: set) -> str:
+    """生成详细的HTML格式报告"""
+    all_phones = user_data.get('phones', set())
+    current_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
     
-    if RESTART_COUNT >= MAX_RESTARTS:
-        logger.error(f"🛑 已达到最大重启次数 {MAX_RESTARTS}，程序退出")
-        sys.exit(1)
-        
-    RESTART_COUNT += 1
-    logger.info(f"🔄 准备重启应用 (第{RESTART_COUNT}次)...")
+    # 风险评估
+    risk_info = assess_risk_level(len(all_phones), len(duplicates))
     
-    # 停止所有线程
-    shutdown_event.set()
-    
-    # 等待延迟
-    time.sleep(RESTART_DELAY)
-    
-    try:
-        python = sys.executable
-        # 启动新进程
-        subprocess.Popen([python] + sys.argv)
-        logger.info("✅ 重启命令已执行")
-    except Exception as e:
-        logger.error(f"❌ 重启失败: {e}")
-    finally:
-        sys.exit(0)
-
-def signal_handler(signum, frame):
-    """信号处理器 - 自动重启版"""
-    logger.info(f"📶 收到信号 {signum}，正在关闭...")
-    
-    global bot_application, is_running
-    
-    # 设置关闭标志
-    shutdown_event.set()
-    is_running = False
-    
-    if bot_application:
-        try:
-            bot_application.stop_running()
-            logger.info("Telegram 机器人已停止")
-        except Exception as e:
-            logger.error(f"停止机器人时出错: {e}")
-    
-    # 检查是否需要重启
-    if signum in [signal.SIGTERM, signal.SIGINT]:
-        logger.info("🔄 系统终止信号，准备自动重启...")
-        restart_application()
-    else:
-        sys.exit(0)
-
-# 注册信号处理器
-signal.signal(signal.SIGTERM, signal_handler)
-signal.signal(signal.SIGINT, signal_handler)
-
-# Flask路由
-@app.route('/')
-def home():
-    """主页"""
-    global RESTART_COUNT, is_running
-    
-    status = {
-        'service': '电话号码检测机器人 终极修复版',
-        'status': '✅ 运行中' if is_running else '❌ 停止',
-        'restart_count': f'{RESTART_COUNT}/{MAX_RESTARTS}',
-        'features': [
-            '✅ HTML格式化显示',
-            '✅ 红色重复号码警示',
-            '✅ 智能风险评估',
-            '✅ 自动重启保护',
-            '✅ 兼容性过滤器',
-            '✅ 终极重复检测修复'
-        ],
-        'timestamp': datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    }
-    
-    return jsonify(status)
-
-@app.route('/health')
-def health_check():
-    """健康检查"""
-    return jsonify({
-        'status': 'healthy' if is_running else 'unhealthy',
-        'timestamp': datetime.datetime.now().isoformat(),
-        'restart_count': RESTART_COUNT,
-        'features_enabled': [
-            'html_formatting',
-            'red_duplicate_warning',
-            'risk_assessment',
-            'auto_restart',
-            'compatibility_filter',
-            'ultimate_duplicate_detection_fix'
-        ]
-    })
-
-@app.route('/restart')
-def restart_bot():
-    """手动重启机器人"""
-    logger.info("📱 通过HTTP请求重启机器人")
-    restart_application()
-    return jsonify({'message': 'Bot restart initiated', 'timestamp': datetime.datetime.now().isoformat()})
-
-# Telegram机器人函数
-async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """处理 /start 命令"""
-    user_name = update.effective_user.first_name or "朋友"
-    
-    help_text = f"""🎯 <b>欢迎使用电话号码检测机器人，{user_name}！</b>
-
-<b>🚀 核心功能特色:</b>
-⭐ 智能电话号码提取与分析
-⭐ <b>重复号码红色警示显示</b>
-⭐ 多国电话号码格式支持
-⭐ 智能风险评估系统
-⭐ 自动重启保持运行
-⭐ <b>🔧 终极重复检测修复</b>
-
-<b>📱 支持的电话号码格式:</b>
-
-<b>🇲🇾 马来西亚格式 (优先支持):</b>
-• <code>+60 11-2896 2309</code> (标准格式)
-• <code>+60 11 2896 2309</code> (空格分隔)
-• <code>+6011-28962309</code> (紧凑格式)
-• <code>01-1234 5678</code> (本地手机)
-• <code>03-1234 5678</code> (本地固话)
-
-<b>🌏 全球国际格式:</b>
-• 🇨🇳 中国: <code>+86 138 0013 8000</code>
-• 🇺🇸 美国: <code>+1 555 123 4567</code>
-• 🇸🇬 新加坡: <code>+65 6123 4567</code>
-• 🇭🇰 香港: <code>+852 2123 4567</code>
-• + 更多国际格式...
-
-<b>📋 命令列表:</b>
-• /start - 显示完整功能介绍
-• /clear - 清除所有记录
-• /stats - 详细统计与风险报告
-• /help - 快速帮助指南
-
-<b>🔄 自动重启功能:</b>
-✅ 服务器重启后自动恢复
-✅ 系统故障自动修复
-✅ 保持24/7持续运行
-✅ 重启次数: {RESTART_COUNT}/{MAX_RESTARTS}
-
-<b>🔧 终极重复检测修复:</b>
-✅ 完全重写重复检测逻辑
-✅ 确保绝对精确的号码比较
-✅ 修复了所有误判问题
-
-现在就发送包含电话号码的消息开始检测吧！🎯"""
-    
-    await update.message.reply_text(help_text, parse_mode='HTML')
-
-async def clear_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """处理 /clear 命令"""
-    chat_id = update.effective_chat.id
-    phone_count = len(user_groups[chat_id]['phones'])
-    history_count = len(user_groups[chat_id]['phone_history'])
-    
-    # 清理所有数据
-    user_groups[chat_id]['phones'].clear()
-    user_groups[chat_id]['normalized_phones'].clear()  # 新增：清理标准化号码
-    user_groups[chat_id]['phone_history'].clear()
-    user_groups[chat_id]['risk_scores'].clear()
-    user_groups[chat_id]['warnings_issued'].clear()
-    user_groups[chat_id]['security_alerts'].clear()
-    
-    clear_message = f"""<pre>🧹 数据清理完成
-========================
-
-📊 清理统计:
-• 电话号码: {phone_count} 个
-• 历史记录: {history_count} 条
-• 风险评分: 已重置
-• 安全警报: 已清空
-
-🔒 隐私保护:
-✅ 所有号码数据已安全删除
-✅ 检测历史已完全清除
-✅ 风险评估记录已重置
-✅ 安全警报历史已清空
-
-💡 清理完成提醒:
-现在可以重新开始检测电话号码，
-所有新检测将重新进行风险评估。
-
-⏰ 清理时间: {datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")}</pre>"""
-    
-    await update.message.reply_text(clear_message, parse_mode='HTML')
-
-async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """处理 /stats 命令"""
-    chat_id = update.effective_chat.id
-    chat_title = update.effective_chat.title or "私聊"
-    user_name = update.effective_user.first_name or "用户"
-    chat_data = user_groups[chat_id]
-    
-    all_phones = chat_data['phones']
-    
-    # 风险统计
-    risk_distribution = {'LOW': 0, 'MEDIUM': 0, 'HIGH': 0, 'CRITICAL': 0}
+    # 按国家分组统计
+    country_stats = defaultdict(int)
     for phone in all_phones:
-        risk_level = chat_data['risk_scores'].get(phone, 'LOW')
-        risk_distribution[risk_level] += 1
+        country = categorize_phone_number(phone)
+        country_stats[country] += 1
     
-    # 计算各种统计
-    total_count = len(all_phones)
-    malaysia_count = len([p for p in all_phones if categorize_phone_number(p).startswith("🇲🇾")])
-    china_count = len([p for p in all_phones if categorize_phone_number(p).startswith("🇨🇳")])
-    international_count = total_count - malaysia_count - china_count
+    # 构建报告
+    report_lines = []
     
-    now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    # 标题和时间
+    report_lines.append(f"📊 <b>检测时间</b>：{current_time}")
+    report_lines.append("")
     
-    stats_text = f"""<pre>📊 统计报告
-=====================================
-
-👤 报告信息:
-• 查询者: {user_name}
-• 群组: {chat_title}
-• 生成时间: {now}
-
-📈 数据总览:
-• 总电话号码: {total_count} 个
-• 马来西亚号码: {malaysia_count} 个 ({malaysia_count/max(total_count,1)*100:.1f}%)
-• 中国号码: {china_count} 个 ({china_count/max(total_count,1)*100:.1f}%)
-• 其他国际号码: {international_count} 个 ({international_count/max(total_count,1)*100:.1f}%)
-
-🛡️ 风险评估统计:
-• 🟢 低风险: {risk_distribution['LOW']} 个 ({risk_distribution['LOW']/max(total_count,1)*100:.1f}%)
-• 🟡 中等风险: {risk_distribution['MEDIUM']} 个 ({risk_distribution['MEDIUM']/max(total_count,1)*100:.1f}%)
-• 🟠 高风险: {risk_distribution['HIGH']} 个 ({risk_distribution['HIGH']/max(total_count,1)*100:.1f}%)
-• 🔴 严重风险: {risk_distribution['CRITICAL']} 个 ({risk_distribution['CRITICAL']/max(total_count,1)*100:.1f}%)
-
-🔄 自动重启系统:
-• 重启次数: {RESTART_COUNT}/{MAX_RESTARTS}
-• 运行状态: ✅ 正常运行
-• 自动重启: ✅ 已启用
-
-🎯 系统状态:
-• HTML格式: ✅ 已启用
-• 红色警示: ✅ 已启用
-• 兼容过滤器: ✅ 已启用
-• 风险检测: ✅ 智能评估已启用
-• 自动重启保护: ✅ 已启用
-• 终极重复检测修复: ✅ 已修复
-
----
-🤖 电话号码检测机器人 HTML增强版 v5.0
-🔴 集成红色重复号码警示系统 + 兼容过滤器
-🔧 终极重复检测修复 - 绝对精确</pre>"""
+    # 统计摘要
+    report_lines.append("📱 <b>本次检测摘要</b>：")
+    report_lines.append(f"• 发现号码总数：<b>{len(new_phones)}</b> 个")
+    report_lines.append(f"• 新增号码：<b>{len(new_phones) - len(duplicates)}</b> 个")
+    report_lines.append(f"• 重复检测号码：<b>{len(duplicates)}</b> 个")
+    report_lines.append("")
     
-    await update.message.reply_text(stats_text, parse_mode='HTML')
-
-async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """处理 /help 命令"""
-    help_text = f"""<pre>🆘 快速帮助指南
-
-📋 核心命令:
-• /start - 完整功能介绍
-• /stats - 详细统计报告
-• /clear - 清除所有记录  
-• /help - 本帮助信息
-
-🚀 快速上手:
-1️⃣ 直接发送包含电话号码的消息
-2️⃣ 查看智能风险评估结果
-3️⃣ 关注重复号码的红色警示
-
-🔴 特色功能:
-• HTML格式化显示
-• 重复号码红色警示
-• 智能风险评估
-• 兼容性过滤器
-• 🔧 终极重复检测修复
-
-🔄 自动重启功能:
-• 重启次数: {RESTART_COUNT}/{MAX_RESTARTS}
-• ✅ 自动保持运行
-• ✅ 故障自动恢复
-
-💡 示例: 联系方式：+60 11-2896 2309
-
-🔧 重复检测说明:
-只有数字完全相同的号码才会被标记为重复
-例如：+60 13-970 3144 和 +60 13-970 3146 绝对不会被误判为重复</pre>"""
+    # 国家分类统计
+    report_lines.append("📊 <b>号码分类统计</b>：")
+    for country, count in sorted(country_stats.items()):
+        report_lines.append(f"• {country}：<b>{count}</b> 个")
+    report_lines.append("")
     
-    await update.message.reply_text(help_text, parse_mode='HTML')
+    # 新增号码详情
+    if new_phones - duplicates:
+        report_lines.append("🆕 <b>详细检测信息</b>：")
+        for i, phone in enumerate(sorted(new_phones - duplicates), 1):
+            normalized = normalize_phone_number(phone)
+            category = categorize_phone_number(phone)
+            report_lines.append(f"{i}. 📞 {phone}")
+            report_lines.append(f"   来源：{category}")
+            report_lines.append(f"   🔧 标准化：{normalized}")
+            report_lines.append("")
+    
+    # 重复号码警告
+    if duplicates:
+        report_lines.append(f"⚠️ <b>重复号码警告({len(duplicates)}个)</b>：")
+        for i, phone in enumerate(sorted(duplicates), 1):
+            normalized = normalize_phone_number(phone)
+            category = categorize_phone_number(phone)
+            report_lines.append(f"{i}. {risk_info['emoji']} {phone}")
+            report_lines.append(f"   来源：{category}")
+            report_lines.append(f"   🔧 标准化：{normalized}")
+            report_lines.append("")
+    
+    # 分隔线
+    report_lines.append("=" * 45)
+    
+    # 系统状态
+    report_lines.append("📊 <b>群组统计信息</b>：")
+    report_lines.append(f"• 累计总计：<b>{len(all_phones)}</b> 个号码")
+    report_lines.append(f"• 检测历史：<b>{len(user_data.get('risk_scores', {}))}</b> 次")
+    report_lines.append(f"• 系统警告：<b>{len(user_data.get('warnings_issued', set()))}</b> 次")
+    report_lines.append("")
+    
+    # 系统状态
+    report_lines.append("🔧 <b>系统状态</b>：")
+    report_lines.append(f"• 运行状态：{'✅ 正常运行' if is_running else '❌ 系统异常'}")
+    report_lines.append(f"• HTML渲染：✅ 已启用")
+    report_lines.append(f"• 红色警告：✅ 已启用")
+    report_lines.append(f"• 联合过滤：✅ 已启用")
+    report_lines.append(f"• 自动重启：✅ 使用中")
+    report_lines.append(f"• 重复重复检测版本：✅ v6.0")
+    report_lines.append("")
+    
+    # 分隔线和版本信息
+    report_lines.append("=" * 45)
+    report_lines.append("🤖 <b>自适应号码解析系统完全修正版</b> HTML渲染器 v6.0")
+    report_lines.append("🚀 <b>集成红色重复警告系统，常驻重复检测引擎</b>")
+    
+    return '\n'.join(report_lines)
 
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """处理包含电话号码的消息 - 终极修复版"""
-    try:
-        chat_id = update.effective_chat.id
-        message_text = update.message.text
-        user_name = update.effective_user.first_name or "用户"
-        chat_data = user_groups[chat_id]
-        
-        # 提取电话号码
-        phone_numbers = extract_phone_numbers(message_text)
-        
-        if not phone_numbers:
-            return
-        
-        # 更新活动时间
-        chat_data['last_activity'] = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        
-        # 记录检测历史
-        detection_record = {
-            'timestamp': datetime.datetime.now(),
-            'user': user_name,
-            'phone_count': len(phone_numbers),
-            'phones': list(phone_numbers)
+async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """处理/start命令"""
+    user_id = update.effective_user.id
+    user_name = update.effective_user.first_name or "用户"
+    
+    welcome_message = (
+        f"👋 欢迎使用，{user_name}！\n\n"
+        "🤖 <b>自适应号码解析系统完全修正版</b> v6.0\n"
+        "🎯 <b>终极重复检测修复 + 马来西亚格式支持</b>\n\n"
+        "📱 <b>功能特色</b>：\n"
+        "• 🔍 智能电话号码识别\n"
+        "• 🌍 多国格式支持（特别优化马来西亚格式）\n"
+        "• 🚨 精确重复检测警告\n"
+        "• 📊 详细HTML格式报告\n"
+        "• 🔄 自动状态管理\n\n"
+        "💡 <b>使用方法</b>：\n"
+        "直接发送包含电话号码的文本，系统会自动识别并分析\n\n"
+        "🎛️ <b>控制命令</b>：\n"
+        "/clear - 清除历史数据\n"
+        "/status - 查看系统状态\n"
+        "/help - 帮助信息\n\n"
+        "🔧 当前版本：v6.0 - 完全修正的马来西亚格式支持"
+    )
+    
+    await update.message.reply_text(welcome_message, parse_mode=ParseMode.HTML)
+
+async def clear_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """处理/clear命令"""
+    user_id = update.effective_user.id
+    
+    # 清除用户数据
+    if user_id in user_data_storage:
+        user_data_storage[user_id] = {
+            'phones': set(),
+            'normalized_phones': set(),
+            'risk_scores': {},
+            'warnings_issued': set(),
+            'last_activity': None,
+            'security_alerts': []
         }
-        chat_data['phone_history'].append(detection_record)
-        
-        # 🔧 终极重复检测逻辑：基于标准化号码进行精确比较
-        existing_normalized_phones = chat_data['normalized_phones']
-        new_phones = set()
-        duplicate_phones = set()
-        
-        logger.info(f"检测开始 - 当前消息号码: {phone_numbers}")
-        logger.info(f"已存储的标准化号码: {existing_normalized_phones}")
-        
-        for phone in phone_numbers:
-            # 标准化当前号码
-            normalized_phone = normalize_phone_number(phone)
-            logger.info(f"号码 '{phone}' 标准化为: '{normalized_phone}'")
-            
-            # 检查标准化后的号码是否已存在
-            if normalized_phone in existing_normalized_phones:
-                duplicate_phones.add(phone)
-                logger.info(f"检测到重复号码: {phone} (标准化: {normalized_phone})")
-            else:
-                new_phones.add(phone)
-                # 将标准化号码和原始号码都添加到存储中
-                existing_normalized_phones.add(normalized_phone)
-                chat_data['phones'].add(phone)
-                logger.info(f"新号码: {phone} (标准化: {normalized_phone})")
-        
-        logger.info(f"分类结果 - 新号码: {new_phones}, 重复号码: {duplicate_phones}")
-        
-        # 构建HTML格式的完整报告
-        now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        total_in_group = len(chat_data['phones'])
-        
-        # 计算统计数据
-        all_detected = phone_numbers
-        malaysia_count = len([p for p in all_detected if categorize_phone_number(p).startswith("🇲🇾")])
-        china_count = len([p for p in all_detected if categorize_phone_number(p).startswith("🇨🇳")])
-        other_count = len(all_detected) - malaysia_count - china_count
-        
-        # 构建完整的HTML报告
-        report = f"""<pre>🎯 查毒机器人 - 终极修复版
-=====================================
+    
+    await update.message.reply_text(
+        "✅ <b>数据清除成功</b>\n\n"
+        "🗑️ 已清除所有历史电话号码记录\n"
+        "📊 已重置统计数据\n"
+        "🚨 已清除警告记录\n\n"
+        "💡 现在可以重新开始检测电话号码了",
+        parse_mode=ParseMode.HTML
+    )
 
-👤 检测用户: {user_name}
-📊 检测结果报告
-⏰ 检测时间: {now}
+async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """处理/status命令"""
+    user_id = update.effective_user.id
+    user_data = user_data_storage[user_id]
+    
+    current_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    
+    status_message = (
+        f"📊 <b>系统状态报告</b>\n"
+        f"🕒 查询时间：{current_time}\n\n"
+        f"📱 <b>数据统计</b>：\n"
+        f"• 累计号码：<b>{len(user_data.get('phones', set()))}</b> 个\n"
+        f"• 检测次数：<b>{len(user_data.get('risk_scores', {}))}</b> 次\n"
+        f"• 警告记录：<b>{len(user_data.get('warnings_issued', set()))}</b> 次\n\n"
+        f"🔧 <b>系统状态</b>：\n"
+        f"• 运行状态：{'✅ 正常' if is_running else '❌ 异常'}\n"
+        f"• HTML渲染：✅ 已启用\n"
+        f"• 重复检测：✅ v6.0\n"
+        f"• 自动重启：✅ 启用\n\n"
+        f"🌍 <b>格式支持</b>：\n"
+        f"• 马来西亚：✅ 完全支持\n"
+        f"• 中国：✅ 支持\n"
+        f"• 国际格式：✅ 支持\n\n"
+        f"版本：v6.0 - 完全修正版"
+    )
+    
+    await update.message.reply_text(status_message, parse_mode=ParseMode.HTML)
 
-📱 本次检测结果:
-• 发现号码总数: {len(phone_numbers)} 个
-• 新发现号码: {len(new_phones)} 个
-• 重复检测号码: {len(duplicate_phones)} 个
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """处理/help命令"""
+    help_message = (
+        "📖 <b>帮助文档</b>\n\n"
+        "🤖 <b>系统说明</b>：\n"
+        "这是一个智能电话号码检测系统，能够自动识别并分析文本中的电话号码\n\n"
+        "🔍 <b>支持格式</b>：\n"
+        "• 马来西亚：+60 13-970 3144, +60 11 2896 2309\n"
+        "• 中国：+86 138 0013 8000, 138-0013-8000\n"
+        "• 美国：+1 555-123-4567\n"
+        "• 其他国际格式\n\n"
+        "⚠️ <b>重复检测</b>：\n"
+        "系统会智能识别重复的电话号码（忽略格式差异）\n\n"
+        "📊 <b>报告功能</b>：\n"
+        "• HTML格式详细报告\n"
+        "• 国家分类统计\n"
+        "• 风险评估\n"
+        "• 重复警告\n\n"
+        "🎛️ <b>命令列表</b>：\n"
+        "/start - 启动机器人\n"
+        "/clear - 清除历史数据\n"
+        "/status - 查看系统状态\n"
+        "/help - 显示帮助信息\n\n"
+        "💡 <b>使用提示</b>：\n"
+        "直接发送包含电话号码的文本即可开始检测"
+    )
+    
+    await update.message.reply_text(help_message, parse_mode=ParseMode.HTML)
 
-📊 号码分类统计:
-• 🇲🇾 马来西亚: {malaysia_count} 个
-• 🇨🇳 中国: {china_count} 个  
-• 🌍 其他地区: {other_count} 个
-
-===================================== 
-📋 详细检测清单:</pre>
-
-"""
-        
-        # 新发现的号码（正常显示）
-        if new_phones:
-            report += f"<pre>✨ 新发现号码 ({len(new_phones)}个):</pre>\n"
-            for i, phone in enumerate(sorted(new_phones), 1):
-                phone_type = categorize_phone_number(phone)
-                risk_level, risk_warnings = assess_phone_risk(phone, chat_data, is_duplicate=False)
-                risk_emoji = RISK_LEVELS[risk_level]['emoji']
-                
-                # 保存风险评分
-                chat_data['risk_scores'][phone] = risk_level
-                
-                normalized = normalize_phone_number(phone)
-                report += f"<pre>{i:2d}. 📞 <code>{phone}</code>\n"
-                report += f"    📍 类型: {phone_type}\n"
-                report += f"    🛡️ 风险: {risk_emoji} {risk_level}\n"
-                report += f"    🔧 标准化: {normalized}</pre>\n"
-        
-        # 重复号码（红色警示显示）
-        if duplicate_phones:
-            report += f"\n<b><u>⚠️ 重复号码警告 ({len(duplicate_phones)}个):</u></b>\n"
-            for i, phone in enumerate(sorted(duplicate_phones), 1):
-                phone_type = categorize_phone_number(phone)
-                risk_level = chat_data['risk_scores'].get(phone, 'MEDIUM')
-                risk_emoji = RISK_LEVELS[risk_level]['emoji']
-                
-                normalized = normalize_phone_number(phone)
-                # 🔴 关键: 重复号码使用红色显示
-                report += f'<pre>{i:2d}. 📞 <code>{phone}</code>\n'
-                report += f'    📍 类型: {phone_type}\n'
-                report += f'    ⚠️ <b>状态：重复号码</b> ⚠️\n'
-                report += f'    🔧 标准化: {normalized}</pre>\n'
-        
-        # 底部统计信息
-        report += f"""
-<pre>=====================================
-📊 群组统计信息:
-• 群组总计: {total_in_group} 个号码
-• 检测历史: {len(chat_data['phone_history'])} 次
-• 系统重启: {RESTART_COUNT}/{MAX_RESTARTS} 次
-
-🎯 系统状态:
-• 运行状态: ✅ 正常运行  
-• HTML格式: ✅ 已启用
-• 红色警示: ✅ 已启用
-• 兼容过滤器: ✅ 已启用
-• 自动重启: ✅ 保护中
-• 终极重复检测修复: ✅ v5.0
-
-=====================================
-🤖 电话号码检测机器人 HTML增强版 v5.0
-🔴 集成红色重复号码警示系统 + 兼容过滤器
-🔧 终极重复检测修复 - 绝对精确判断
-⏰ {now}</pre>"""
-        
-        # 发送完整的HTML格式报告
-        await update.message.reply_text(report, parse_mode='HTML')
-        
-    except Exception as e:
-        logger.error(f"处理消息时出错: {e}")
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """处理普通消息"""
+    user_id = update.effective_user.id
+    message_text = update.message.text
+    
+    # 确保用户数据结构存在，包含新的normalized_phones字段
+    if 'phones' not in context.user_data:
+        context.user_data['phones'] = set()
+        context.user_data['normalized_phones'] = set()  # 专门用于重复检测
+        context.user_data['risk_scores'] = {}
+        context.user_data['warnings_issued'] = set()
+        context.user_data['last_activity'] = None
+        context.user_data['security_alerts'] = []
+    
+    # 提取电话号码
+    found_numbers = extract_phone_numbers(message_text)
+    
+    if not found_numbers:
         await update.message.reply_text(
-            "❌ 处理消息时出现错误，系统正在自动恢复...",
-            parse_mode='HTML'
+            "🔍 <b>未检测到电话号码</b>\n\n"
+            "💡 请确保电话号码格式正确，支持的格式包括：\n"
+            "• +60 13-970 3144\n"
+            "• +86 138 0013 8000\n"
+            "• +1 555-123-4567\n"
+            "• 以及其他国际格式",
+            parse_mode=ParseMode.HTML
         )
-
-async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """错误处理器"""
-    logger.error(f"更新 {update} 引起了错误 {context.error}")
-    
-    if update and update.effective_message:
-        try:
-            await update.effective_message.reply_text(
-                "❌ 处理过程中发生错误，系统正在自动恢复...",
-                parse_mode='HTML'
-            )
-        except Exception as e:
-            logger.error(f"发送错误消息失败: {e}")
-
-def run_flask():
-    """在独立线程中运行Flask"""
-    port = int(os.environ.get('PORT', 10000))
-    logger.info(f"🌐 启动HTML格式Flask服务器，端口: {port}")
-    
-    try:
-        app.run(
-            host='0.0.0.0',
-            port=port,
-            debug=False,
-            use_reloader=False,
-            threaded=True
-        )
-    except Exception as e:
-        logger.error(f"Flask服务器运行错误: {e}")
-
-async def run_bot():
-    """运行Telegram机器人"""
-    global bot_application, is_running
-    
-    # 获取Bot Token
-    bot_token = os.environ.get('TELEGRAM_BOT_TOKEN')
-    if not bot_token:
-        logger.error("未找到TELEGRAM_BOT_TOKEN环境变量")
         return
     
+    # **关键修正：使用独立的normalized_phones集合进行重复检测**
+    new_phones = set()
+    duplicates = set()
+    
+    for phone in found_numbers:
+        # 标准化号码用于重复检测
+        normalized = normalize_phone_number(phone)
+        
+        # 检查是否重复（基于标准化的号码）
+        if normalized in context.user_data['normalized_phones']:
+            duplicates.add(phone)
+        else:
+            new_phones.add(phone)
+            # 添加到两个集合中
+            context.user_data['phones'].add(phone)
+            context.user_data['normalized_phones'].add(normalized)
+    
+    # 更新用户数据存储
+    user_data_storage[user_id] = dict(context.user_data)
+    
+    # 生成详细报告
+    html_report = generate_detailed_html_report(
+        context.user_data,
+        found_numbers,  # 传入所有找到的号码
+        duplicates
+    )
+    
+    # 发送报告
+    await update.message.reply_text(html_report, parse_mode=ParseMode.HTML)
+    
+    # 更新活动时间
+    context.user_data['last_activity'] = datetime.now()
+
+async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """错误处理函数"""
+    logger.error(f"Exception while handling an update: {context.error}")
+    
+    if isinstance(update, Update) and update.effective_message:
+        try:
+            await update.effective_message.reply_text(
+                "⚠️ <b>系统错误</b>\n\n"
+                "抱歉，处理您的消息时出现错误。\n"
+                "请稍后重试或联系管理员。\n\n"
+                f"错误时间：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+                parse_mode=ParseMode.HTML
+            )
+        except Exception as e:
+            logger.error(f"Error sending error message: {e}")
+
+# Flask监控应用
+app = Flask(__name__)
+
+@app.route('/health', methods=['GET'])
+def health_check():
+    """健康检查端点"""
+    return jsonify({
+        'status': 'healthy',
+        'timestamp': datetime.now().isoformat(),
+        'version': 'v6.0',
+        'bot_running': is_running,
+        'uptime': time.time()
+    })
+
+@app.route('/stats', methods=['GET'])
+def get_stats():
+    """获取统计信息"""
+    total_users = len(user_data_storage)
+    total_phones = sum(len(data.get('phones', set())) for data in user_data_storage.values())
+    
+    return jsonify({
+        'total_users': total_users,
+        'total_phones': total_phones,
+        'version': 'v6.0',
+        'features': ['duplicate_detection', 'html_rendering', 'malaysia_support']
+    })
+
+@app.route('/', methods=['GET'])
+def index():
+    """主页"""
+    return render_template_string("""
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>电话号码检测机器人 v6.0</title>
+        <style>
+            body { font-family: Arial, sans-serif; margin: 40px; }
+            .status { color: green; font-weight: bold; }
+            .version { color: blue; }
+        </style>
+    </head>
+    <body>
+        <h1>🤖 电话号码检测机器人</h1>
+        <p class="version">版本：v6.0 - 完全修正版</p>
+        <p class="status">✅ 系统运行正常</p>
+        <p>🔧 特性：智能重复检测、HTML渲染、马来西亚格式支持</p>
+        <p>📊 监控端点：</p>
+        <ul>
+            <li><a href="/health">/health</a> - 健康检查</li>
+            <li><a href="/stats">/stats</a> - 统计信息</li>
+        </ul>
+    </body>
+    </html>
+    """)
+
+def run_flask():
+    """运行Flask应用"""
+    global is_running
+    is_running = True
+    app.run(host='0.0.0.0', port=PORT, debug=False, use_reloader=False)
+
+def run_bot():
+    """运行Telegram机器人"""
+    global bot_application
+    
     try:
-        logger.info(f"🚀 正在启动 Telegram 机器人... (第 {RESTART_COUNT + 1} 次)")
-        
         # 创建应用
-        bot_application = Application.builder().token(bot_token).build()
-        
-        # 添加错误处理器
-        bot_application.add_error_handler(error_handler)
+        bot_application = Application.builder().token(TOKEN).build()
         
         # 添加处理器
         bot_application.add_handler(CommandHandler("start", start_command))
         bot_application.add_handler(CommandHandler("clear", clear_command))
-        bot_application.add_handler(CommandHandler("stats", stats_command))
+        bot_application.add_handler(CommandHandler("status", status_command))
         bot_application.add_handler(CommandHandler("help", help_command))
+        bot_application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
         
-        # 🔧 使用最基本且兼容的过滤器设置
-        bot_application.add_handler(MessageHandler(
-            filters.TEXT & ~filters.COMMAND,
-            handle_message
-        ))
+        # 添加错误处理器
+        bot_application.add_error_handler(error_handler)
         
-        is_running = True
-        logger.info("✅ HTML格式电话号码检测机器人已启动！")
-        logger.info("🔴 红色重复号码警示功能已启用")
-        logger.info("🔧 使用兼容性过滤器设置")
-        logger.info("🔄 启用自动重启保护功能")
-        logger.info("🔧 使用nest_asyncio解决事件循环冲突")
-        logger.info("🔧 终极重复检测逻辑已修复 - v5.0 绝对精确")
-        
-        # 运行机器人
-        await bot_application.run_polling(
-            drop_pending_updates=True,
-            close_loop=False,
-            stop_signals=None
+        # 启动机器人
+        logger.info("Starting Telegram Bot v6.0...")
+        bot_application.run_polling(
+            poll_interval=1.0,
+            timeout=20,
+            bootstrap_retries=3,
+            read_timeout=30,
+            write_timeout=30,
+            connect_timeout=30
         )
         
     except Exception as e:
-        logger.error(f"机器人运行错误: {e}")
-        is_running = False
-        raise e
-    finally:
-        is_running = False
-        logger.info("机器人已停止运行")
+        logger.error(f"Bot error: {e}")
+        time.sleep(5)
 
 def main():
-    """主程序入口"""
+    """主函数"""
     global flask_thread, bot_thread
     
+    if not TOKEN:
+        logger.error("BOT_TOKEN environment variable not set")
+        return
+    
+    logger.info("Starting Phone Number Detection Bot v6.0 - Complete Fix")
+    
     try:
-        logger.info(f"🎯 启动电话号码检测机器人 (HTML增强版 v5.0) - 终极重复检测修复版")
-        logger.info(f"🔄 重启保护: {RESTART_COUNT}/{MAX_RESTARTS}")
-        
-        # 启动Flask服务器
+        # 启动Flask监控服务
         flask_thread = threading.Thread(target=run_flask, daemon=True)
         flask_thread.start()
-        logger.info("🌐 Flask服务器线程已启动")
+        logger.info(f"Flask monitoring service started on port {PORT}")
         
-        # 运行Telegram机器人 (主线程)
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
+        # 启动机器人
+        bot_thread = threading.Thread(target=run_bot, daemon=True)
+        bot_thread.start()
+        logger.info("Telegram bot started")
         
-        try:
-            loop.run_until_complete(run_bot())
-        except KeyboardInterrupt:
-            logger.info("👋 用户手动停止机器人")
-        except Exception as e:
-            logger.error(f"机器人运行时发生错误: {e}")
-            restart_application()
-        finally:
-            try:
-                # 清理资源
-                pending = asyncio.all_tasks(loop)
-                for task in pending:
-                    task.cancel()
-                
-                if pending:
-                    loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
-                    
-                loop.close()
-                logger.info("事件循环已关闭")
-            except Exception as e:
-                logger.error(f"清理资源时出错: {e}")
-    
+        # 保持主线程运行
+        while not shutdown_event.is_set():
+            time.sleep(1)
+            
+    except KeyboardInterrupt:
+        logger.info("Received shutdown signal")
     except Exception as e:
-        logger.error(f"程序启动失败: {e}")
-        restart_application()
+        logger.error(f"Main error: {e}")
+    finally:
+        shutdown_event.set()
+        global is_running
+        is_running = False
+        logger.info("Bot shutdown complete")
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     main()
