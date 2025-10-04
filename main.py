@@ -23,7 +23,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # 机器人Token - 请替换为您的实际Token
-BOT_TOKEN = "7467618162:AAEmW8Yt-nAgJNVCTGiCRItl-HbVAECUOOU"
+BOT_TOKEN = "8424823618:AAFwjIYQH86nKXOiJUybfBRio7sRJl-GUEU"
 
 # 更全面的电话号码匹配模式
 PHONE_PATTERNS = [
