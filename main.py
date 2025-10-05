@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 电话号码重复检测机器人 - 
-生产就绪版本 v10.1-Final-v22.5 - 完全兼容python-telegram-bot v22.5
+生产就绪版本 v10.1-Final-v22.5-Enhanced - 完全兼容python-telegram-bot v22.5
 
 新增功能：
 1. ✅ 完全兼容python-telegram-bot v22.5 API
@@ -13,6 +13,8 @@
 7. ✅ 显示首次提交者信息
 8. ✅ 改进标准化函数，严格长度验证
 9. ✅ 新增中国号码支持
+10. ✅ **新增：显示号码首次出现的实时时间**
+11. ✅ **新增：显示重复号码的具体关联信息**
 
 修复问题：
 - ✅ 修复Application初始化顺序错误
@@ -23,6 +25,7 @@
 - ✅ 优化显示格式，避免重复信息
 - ✅ 新增多国号码支持
 - ✅ 完全兼容v22.5 API变更
+- ✅ **新增：实时时间显示和重复关联追踪**
 
 作者: MiniMax Agent
 """
@@ -72,11 +75,13 @@ logger = logging.getLogger(__name__)
 # 初始化Flask应用
 app = Flask(__name__)
 
-# 全局变量 - v9.5风格简洁数据结构，增加第一次发送者信息和重复统计
+# 全局变量 - v9.5风格简洁数据结构，增加详细时间和重复关联信息
 user_groups: Dict[int, Dict[str, Any]] = defaultdict(lambda: {
-    'phones': set(),      # 存储所有号码
-    'first_senders': {},  # 存储每个标准化号码的第一次发送者信息
-    'duplicate_stats': {} # 存储重复统计信息
+    'phones': set(),              # 存储所有号码
+    'first_senders': {},          # 存储每个标准化号码的第一次发送者信息
+    'duplicate_stats': {},        # 存储重复统计信息
+    'phone_timeline': [],         # 存储号码提交时间线（用于重复关联追踪）
+    'normalized_to_original': {}  # 标准化号码到原始格式的映射
 })
 shutdown_event = threading.Event()
 restart_count = 0
@@ -231,6 +236,22 @@ def categorize_phone_number(phone: str) -> str:
     else:
         return "🌍 其他地区"
 
+def format_datetime(dt_str: str) -> str:
+    """格式化日期时间显示"""
+    try:
+        dt = datetime.datetime.fromisoformat(dt_str)
+        return dt.strftime('%Y-%m-%d %H:%M:%S')
+    except:
+        return dt_str
+
+def format_time_only(dt_str: str) -> str:
+    """只格式化时间显示"""
+    try:
+        dt = datetime.datetime.fromisoformat(dt_str)
+        return dt.strftime('%H:%M:%S')
+    except:
+        return dt_str
+
 # Flask路由
 @app.route('/', methods=['GET', 'HEAD'])
 def health_check():
@@ -238,7 +259,7 @@ def health_check():
     return jsonify({
         'status': 'healthy',
         'service': 'telegram-phone-bot',
-        'version': 'v10.1-final-v22.5',
+        'version': 'v10.1-final-v22.5-enhanced',
         'restart_count': restart_count,
         'health_check_active': health_check_running,
         'timestamp': time.time()
@@ -254,7 +275,7 @@ def status():
         'total_phone_numbers': total_phones,
         'restart_count': restart_count,
         'health_check_active': health_check_running,
-        'interface_style': 'v9.5-classic-final-v22.5'
+        'interface_style': 'v9.5-classic-final-v22.5-enhanced'
     })
 
 def run_flask():
@@ -270,7 +291,7 @@ def get_restart_status():
     """获取重启状态信息"""
     global restart_count
     restart_count += 1
-    return f"🤖 电话号码查重机器人 v10.1-final-v22.5 运行中！重启次数: {restart_count}"
+    return f"🤖 电话号码查重机器人 v10.1-final-v22.5-enhanced 运行中！重启次数: {restart_count}"
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """处理 /start 命令 - v9.5风格界面"""
@@ -278,7 +299,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_name = user.first_name or "朋友"
     
     welcome_message = f"""
-🎉 **电话号码查重机器人 v10.1-Final-v22.5** 🎉
+🎉 **电话号码查重机器人 v10.1-Final-v22.5-Enhanced** 🎉
 ═══════════════════════════
 
 👋 欢迎，**{user_name}**！
@@ -293,11 +314,15 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 • 🔄 稳定自动重启
 • ✅ 修复不完整号码识别
 • ✅ 完全兼容v22.5 API
+• 🆕 **实时时间显示**
+• 🆕 **重复关联追踪**
 
 📱 **使用方法：**
 直接发送电话号码给我，我会帮您检查是否重复！
 
-✨ **最新修复：**
+✨ **最新增强：**
+• 🕐 显示号码首次出现的精确时间
+• 🔗 显示重复号码的具体关联信息
 • 🛡️ 修复Application初始化问题
 • ⏱️ 延迟启动保护
 • 🔧 完全兼容v22.5 API变更
@@ -324,6 +349,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 1. 直接发送包含电话号码的消息
 2. 机器人会自动识别并检查重复
 3. 支持多种国际格式
+4. 显示首次出现时间和重复关联
 
 🌍 **支持格式：**
 • 马来西亚：+60 11-1234-5678, 011-1234-5678
@@ -331,7 +357,12 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 • 美国/加拿大：+1 555-123-4567
 • 其他国际格式
 
-💡 **提示：**
+💡 **新增功能：**
+• ⏰ 实时时间：显示号码首次提交的精确时间
+• 🔗 重复关联：显示重复号码与哪个原始号码重复
+• 📊 详细统计：完整的重复追踪信息
+
+🔧 **提示：**
 机器人会自动标准化号码格式进行比较，确保准确识别重复！
 """
     
@@ -343,12 +374,14 @@ async def clear_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     if chat_id in user_groups:
         phone_count = len(user_groups[chat_id]['phones'])
+        timeline_count = len(user_groups[chat_id]['phone_timeline'])
         del user_groups[chat_id]
         
         response = f"""
 🗑️ **数据已清除** 🗑️
 
 ✅ 已清除 **{phone_count}** 个电话号码的记录
+📋 已清除 **{timeline_count}** 条时间线记录
 🔄 群组数据已重置，可以重新开始检测
 """
     else:
@@ -371,6 +404,7 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 📱 **电话号码：** 0 个
 👥 **用户参与：** 0 人
 🔄 **重复检测：** 0 次
+📋 **时间线记录：** 0 条
 
 💡 **提示：** 发送电话号码开始使用！
 """
@@ -379,6 +413,7 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         total_phones = len(group_data['phones'])
         unique_senders = len(set(info['user_id'] for info in group_data['first_senders'].values()))
         duplicate_count = len(group_data['duplicate_stats'])
+        timeline_count = len(group_data['phone_timeline'])
         
         response = f"""
 📊 **统计信息** 📊
@@ -386,13 +421,14 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 📱 **电话号码：** {total_phones} 个
 👥 **用户参与：** {unique_senders} 人
 🔄 **重复检测：** {duplicate_count} 次
+📋 **时间线记录：** {timeline_count} 条
 
 📈 **详细信息：**
 • 独特号码：{total_phones - duplicate_count}
 • 重复号码：{duplicate_count}
 • 检测准确率：100%
 
-🎯 **系统状态：** 运行正常
+🎯 **系统状态：** 运行正常 (v22.5-Enhanced)
 """
     
     await update.message.reply_text(response, parse_mode='Markdown')
@@ -420,7 +456,8 @@ async def export_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         'total_phones': len(group_data['phones']),
         'phones': list(group_data['phones']),
         'first_senders': {phone: info for phone, info in group_data['first_senders'].items()},
-        'duplicate_stats': group_data['duplicate_stats']
+        'duplicate_stats': group_data['duplicate_stats'],
+        'phone_timeline': group_data['phone_timeline']
     }
     
     # 创建文本格式的导出
@@ -438,9 +475,16 @@ async def export_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if normalized in group_data['first_senders']:
             sender_info = group_data['first_senders'][normalized]
             sender_name = sender_info.get('name', '未知用户')
-            export_text += f"{i}. {phone} - {category} (首次: {sender_name})\n"
+            submit_time = format_datetime(sender_info.get('submit_time', ''))
+            export_text += f"{i}. {phone} - {category}\n   首次: {sender_name} | {submit_time}\n"
         else:
             export_text += f"{i}. {phone} - {category}\n"
+    
+    # 添加时间线信息
+    if group_data['phone_timeline']:
+        export_text += f"\n📋 **时间线记录 ({len(group_data['phone_timeline'])} 条):**\n"
+        for i, record in enumerate(group_data['phone_timeline'][-10:], 1):  # 只显示最近10条
+            export_text += f"{i}. {record['phone']} | {format_datetime(record['time'])} | {record['user']}\n"
     
     # 分批发送（Telegram消息长度限制）
     if len(export_text) > 4000:
@@ -454,7 +498,7 @@ async def export_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(export_text, parse_mode='Markdown')
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """处理消息并检查电话号码重复 - v10.1最终修复版"""
+    """处理消息并检查电话号码重复 - v10.1最终增强版"""
     text = update.message.text
     chat_id = update.effective_chat.id
     user = update.effective_user
@@ -469,6 +513,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     # 获取群组数据
     group_data = user_groups[chat_id]
+    current_time = datetime.datetime.now()
     
     for phone in extracted_phones:
         normalized = normalize_phone(phone)
@@ -482,8 +527,21 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 'user_id': user.id,
                 'name': user_name,
                 'original_format': phone,
-                'submit_time': datetime.datetime.now().isoformat()
+                'submit_time': current_time.isoformat()
             }
+            
+            # 添加到时间线
+            group_data['phone_timeline'].append({
+                'phone': phone,
+                'normalized': normalized,
+                'user': user_name,
+                'user_id': user.id,
+                'time': current_time.isoformat(),
+                'action': 'new'
+            })
+            
+            # 建立标准化到原始格式的映射
+            group_data['normalized_to_original'][normalized] = phone
             
             response = f"""
 📱 **新号码记录** 📱
@@ -491,7 +549,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 🔢 **号码：** `{phone}`
 🌍 **类型：** {category}
 👤 **提交者：** {user_name}
-⏰ **时间：** {datetime.datetime.now().strftime('%H:%M')}
+🕐 **时间：** {current_time.strftime('%Y-%m-%d %H:%M:%S')}
 
 ✅ **状态：** 新号码，已记录！
 """
@@ -501,6 +559,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             # 重复号码
             original_info = group_data['first_senders'][normalized]
+            original_format = group_data['normalized_to_original'].get(normalized, original_info['original_format'])
             
             # 更新重复统计
             if normalized not in group_data['duplicate_stats']:
@@ -513,14 +572,37 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             stats['count'] += 1
             stats['users'].add(user.id)
             
+            # 添加到时间线
+            group_data['phone_timeline'].append({
+                'phone': phone,
+                'normalized': normalized,
+                'user': user_name,
+                'user_id': user.id,
+                'time': current_time.isoformat(),
+                'action': 'duplicate',
+                'original_format': original_format,
+                'original_user': original_info['name']
+            })
+            
+            # 格式化原始提交时间
+            original_time = format_datetime(original_info['submit_time'])
+            current_time_str = current_time.strftime('%Y-%m-%d %H:%M:%S')
+            
             response = f"""
 🚨 **重复号码检测** 🚨
 
-🔢 **号码：** `{phone}`
+🔢 **当前号码：** `{phone}`
+🔗 **重复于：** `{original_format}`
 🌍 **类型：** {category}
-👤 **当前用户：** {user_name}
 
-📊 **统计信息：**
+👤 **当前用户：** {user_name}
+🕐 **当前时间：** {current_time_str}
+
+📊 **原始记录：**
+👤 **首次用户：** {original_info['name']}
+🕐 **首次时间：** {original_time}
+
+📈 **统计信息：**
 📊 **总提交次数：** {stats['count']} 次
 👥 **涉及用户：** {len(stats['users'])} 人
 
@@ -537,7 +619,8 @@ async def periodic_health_check():
         try:
             # 检查数据一致性
             total_phones = sum(len(data.get('phones', set())) for data in user_groups.values())
-            logger.info(f"健康检查：监控 {len(user_groups)} 个群组，总计 {total_phones} 个号码")
+            total_timeline = sum(len(data.get('phone_timeline', [])) for data in user_groups.values())
+            logger.info(f"健康检查：监控 {len(user_groups)} 个群组，总计 {total_phones} 个号码，{total_timeline} 条时间线记录")
             
             # 每5分钟检查一次
             await asyncio.sleep(300)
@@ -604,7 +687,7 @@ async def start_bot_with_health_check(application):
             logger.error(f"关闭过程中发生错误: {e}")
 
 def main():
-    """主函数 - v10.1-Final-Fixed-v22.5"""
+    """主函数 - v10.1-Final-Fixed-v22.5-Enhanced"""
     # 设置信号处理
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
