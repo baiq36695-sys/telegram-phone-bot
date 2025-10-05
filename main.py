@@ -1,21 +1,17 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-电话号码重复检测机器人 - Render简化部署版
-版本: v3.1 - 移除Flask依赖，使用内置HTTP服务器
+电话号码重复检测机器人 - Render最终修复版
+版本: v3.2 - 纯Telegram Bot，无HTTP服务器
 最后更新: 2025-10-05
 """
 
 import os
 import logging
 import re
-import threading
-import time
 from datetime import datetime, timedelta
-from collections import defaultdict, Counter
-from typing import Dict, List, Set, Optional
-from http.server import HTTPServer, BaseHTTPRequestHandler
-import json
+from collections import defaultdict
+from typing import Dict, List, Optional
 
 # Telegram相关导入
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -38,9 +34,6 @@ logger = logging.getLogger(__name__)
 # Telegram Bot Token
 BOT_TOKEN = os.environ.get('BOT_TOKEN', '8424823618:AAFwjIYQH86nKXOiJUybfBRio7sRJl-GUEU')
 
-# Render端口配置
-PORT = int(os.environ.get('PORT', 10000))
-
 # 全局数据存储
 phone_data = {}  # {chat_id: {phone: count}}
 user_stats = defaultdict(lambda: {'total_phones': 0, 'duplicates_found': 0, 'last_activity': datetime.now()})
@@ -50,53 +43,6 @@ bot_stats = {
     'total_duplicates': 0,
     'total_users': 0
 }
-
-# =============================================================================
-# 简化的HTTP健康检查服务器
-# =============================================================================
-
-class HealthCheckHandler(BaseHTTPRequestHandler):
-    """简化的健康检查处理器"""
-    
-    def do_GET(self):
-        """处理GET请求"""
-        if self.path == '/' or self.path == '/health':
-            self.send_response(200)
-            self.send_header('Content-type', 'text/plain')
-            self.end_headers()
-            self.wfile.write(b'Telegram Bot is running!')
-        
-        elif self.path == '/status':
-            self.send_response(200)
-            self.send_header('Content-type', 'application/json')
-            self.end_headers()
-            
-            uptime = datetime.now() - bot_stats['start_time']
-            status_data = {
-                'status': 'running',
-                'uptime_seconds': int(uptime.total_seconds()),
-                'total_messages': bot_stats['total_messages'],
-                'total_users': bot_stats['total_users'],
-                'port': PORT
-            }
-            self.wfile.write(json.dumps(status_data).encode())
-        
-        else:
-            self.send_response(404)
-            self.end_headers()
-    
-    def log_message(self, format, *args):
-        """禁用默认日志输出"""
-        pass
-
-def run_health_server():
-    """运行健康检查服务器"""
-    try:
-        server = HTTPServer(('0.0.0.0', PORT), HealthCheckHandler)
-        logger.info(f"健康检查服务器启动在端口 {PORT}")
-        server.serve_forever()
-    except Exception as e:
-        logger.error(f"健康检查服务器启动失败: {e}")
 
 # =============================================================================
 # 电话号码处理功能
@@ -435,7 +381,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 def main():
     """主函数"""
     try:
-        print("🤖 电话号码重复检测机器人 - Render简化版启动中...")
+        print("🤖 电话号码重复检测机器人 - 纯Telegram版启动中...")
         
         # 验证BOT_TOKEN
         if not BOT_TOKEN or BOT_TOKEN == 'YOUR_BOT_TOKEN_HERE':
@@ -448,15 +394,7 @@ def main():
         print("   ✅ 多格式支持 - 已启用") 
         print("   ✅ 实时警告 - 已启用")
         print("   ✅ 详细统计 - 已启用")
-        print("   ✅ 简化部署 - 无Flask依赖")
-        
-        # 启动内置HTTP健康检查服务器(后台线程)
-        health_thread = threading.Thread(target=run_health_server, daemon=True)
-        health_thread.start()
-        print(f"🌐 健康检查服务器已启动在端口 {PORT}")
-        
-        # 等待健康服务器启动
-        time.sleep(1)
+        print("   ✅ 纯机器人模式 - 无端口冲突")
         
         # 创建Telegram应用
         application = Application.builder().token(BOT_TOKEN).build()
@@ -470,7 +408,7 @@ def main():
         application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
         
         print("✅ 机器人启动成功！")
-        print("🎯 机器人现在完全可用，支持Render部署！")
+        print("🎯 机器人现在完全可用，无端口冲突！")
         print("🚀 开始接收消息...")
         
         # 启动机器人 (阻塞主线程)
