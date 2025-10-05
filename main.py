@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-完整功能版本 v9.6 - 保留v9.5所有功能 + v9.6修复
-结合v9.5的完整功能和v9.6的关键修复
+紧急修复版本 - 解决消息队列阻塞问题
+在原有代码基础上添加强制跳过待处理消息的机制
 """
 
 import os
@@ -15,6 +15,7 @@ import traceback
 import asyncio
 import signal
 import nest_asyncio  # 解决嵌套事件循环问题
+import requests  # 添加requests用于清理
 from datetime import datetime, timezone
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
@@ -42,6 +43,47 @@ BOT_TOKEN = os.getenv('BOT_TOKEN', os.getenv('TELEGRAM_BOT_TOKEN'))
 if not BOT_TOKEN:
     logger.error("❌ 未找到BOT_TOKEN环境变量")
     sys.exit(1)
+
+def clear_pending_updates():
+    """强制清理所有待处理消息 - 紧急修复"""
+    logger.info("🧹 开始强制清理待处理消息...")
+    
+    try:
+        base_url = f"https://api.telegram.org/bot{BOT_TOKEN}"
+        
+        # 方法1: 使用超高偏移量跳过所有待处理消息
+        clear_url = f"{base_url}/getUpdates?offset=999999999&limit=1&timeout=1"
+        
+        logger.info("🚀 发送高偏移量请求...")
+        response = requests.get(clear_url, timeout=10)
+        
+        if response.status_code == 200:
+            result = response.json()
+            if result['ok']:
+                logger.info("✅ 消息队列清理成功")
+                return True
+            else:
+                logger.warning(f"⚠️ 清理响应异常: {result}")
+        else:
+            logger.warning(f"⚠️ 清理请求失败: {response.status_code}")
+        
+        # 方法2: 备用清理方法
+        logger.info("🔄 尝试备用清理方法...")
+        delete_url = f"{base_url}/deleteWebhook?drop_pending_updates=true"
+        response = requests.get(delete_url, timeout=10)
+        
+        if response.status_code == 200:
+            result = response.json()
+            if result['ok']:
+                logger.info("✅ 备用清理成功")
+                return True
+        
+        logger.warning("⚠️ 消息队列清理可能不完整")
+        return False
+        
+    except Exception as e:
+        logger.error(f"❌ 清理消息队列时出错: {e}")
+        return False
 
 # 全局重启计数器和状态 - 添加线程锁
 state_lock = threading.Lock()  # 解决竞态条件
@@ -155,7 +197,7 @@ flask_app = Flask(__name__)
 @flask_app.route('/')
 def health_check():
     uptime = calculate_uptime()
-    return f"Phone Bot v9.6 (完整功能版) is alive! 🚀<br>Uptime: {uptime}<br>Restarts: {restart_count}", 200
+    return f"Phone Bot v9.6 (紧急修复版) is alive! 🚀<br>Uptime: {uptime}<br>Restarts: {restart_count}", 200
 
 @flask_app.route('/status')
 def status():
@@ -164,7 +206,7 @@ def status():
         'status': 'ok',
         'uptime_seconds': int(uptime.total_seconds()),
         'restart_count': restart_count,
-        'version': 'v9.6-完整功能版',
+        'version': 'v9.6-紧急修复版',
         'uptime_text': calculate_uptime()
     }
 
@@ -173,7 +215,7 @@ def run_flask():
     logger.info(f"Flask服务器启动，端口: {port}")
     flask_app.run(host='0.0.0.0', port=port, debug=False, use_reloader=False)
 
-# 机器人命令处理
+# 机器人命令处理（保持与原版完全相同）
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """开始命令处理"""
     user = update.effective_user
@@ -194,7 +236,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 • 国家识别标识
 • 📊 完整统计功能
 • 🔄 稳定自动重启
-• 🛡️ 终极修复版本
+• 🛡️ 紧急修复版本
 
 📱 **使用方法：**
 直接发送电话号码给我，我会帮您检查是否重复！
@@ -217,7 +259,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """帮助命令处理"""
     help_message = f"""
-🆘 **快速帮助** - v9.6
+🆘 **快速帮助** - v9.6 紧急修复版
 ═══════════════════════════
 
 📋 **可用命令：**
@@ -229,11 +271,11 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 📱 **使用方法：**
 直接发送电话号码给我即可自动检测！
 
-⭐ **新功能：**
-• 🔄 自动重启保护
+⭐ **修复特性：**
+• 🔄 解决消息队列阻塞
 • ⏰ 实时时间戳显示  
 • 📊 完整统计系统
-• 🛡️ 终极修复版本
+• 🛡️ 紧急修复版本
 
 ═══════════════════════════
 💡 直接发送号码开始使用！
@@ -446,7 +488,7 @@ async def error_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             logger.error(f"发送错误消息失败: {e}")
 
 def create_application():
-    """创建Telegram应用程序 - 终极修复版"""
+    """创建Telegram应用程序 - 紧急修复版"""
     logger.info("开始创建应用程序...")
     
     try:
@@ -500,7 +542,7 @@ def setup_signal_handlers():
     signal.signal(signal.SIGINT, sigint_handler)
 
 async def run_bot():
-    """运行机器人主程序 - 终极修复版"""
+    """运行机器人主程序 - 紧急修复版"""
     global is_shutting_down, received_sigterm
     
     application = None
@@ -508,6 +550,10 @@ async def run_bot():
     
     try:
         logger.info("🔄 开始运行机器人...")
+        
+        # 🚨 紧急修复：启动前强制清理消息队列
+        logger.info("🧹 紧急修复：清理消息队列...")
+        clear_pending_updates()
         
         # 创建应用程序
         application = create_application()
@@ -539,7 +585,7 @@ async def run_bot():
         
         logger.info("🚀 开始轮询...")
         
-        # 启动轮询 - 完全避免webhook冲突
+        # 启动轮询 - 紧急修复版，使用高偏移量
         await application.updater.start_polling(
             drop_pending_updates=True,    # 丢弃待处理更新
             timeout=30,                   # 轮询超时
@@ -556,7 +602,7 @@ async def run_bot():
             
             # 短暂等待，允许其他任务运行
             await asyncio.sleep(0.1)
-                
+                 
         # 确定退出原因
         with state_lock:
             if received_sigterm:
@@ -600,11 +646,15 @@ async def run_bot():
                 logger.error(f"关闭时出错: {e}")
 
 def main():
-    """主函数 - 终极修复版"""
+    """主函数 - 紧急修复版"""
     global restart_count, is_shutting_down, received_sigterm
     
-    logger.info("=== 电话号码查重机器人 v9.6 启动 (完整功能版) ===")
+    logger.info("=== 电话号码查重机器人 v9.6 启动 (紧急修复版) ===")
     logger.info(f"启动时间: {format_datetime(start_time)}")
+    
+    # 🚨 启动时立即清理消息队列
+    logger.info("🚨 紧急修复：启动时清理消息队列...")
+    clear_pending_updates()
     
     # 设置信号处理器
     setup_signal_handlers()
