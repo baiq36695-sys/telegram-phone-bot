@@ -60,8 +60,9 @@ logger = logging.getLogger(__name__)
 # 初始化Flask应用
 app = Flask(__name__)
 
-# 全局变量
-user_groups: Dict[int, Dict[str, Set[str]]] = defaultdict(lambda: defaultdict(set))
+# 全局变量 - 存储详细的号码信息
+user_groups: Dict[int, Dict[str, Dict[str, Any]]] = defaultdict(lambda: defaultdict(dict))
+# 数据结构: {chat_id: {phone: {'first_time': datetime, 'first_user': str, 'count': int, 'last_time': datetime, 'last_user': str}}}
 shutdown_event = threading.Event()
 restart_count = 0
 health_check_running = False
@@ -264,43 +265,42 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(welcome_message, parse_mode='Markdown')
 
 async def clear_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """处理 /clear 命令 - v9.5风格"""
+    """处理 /clear 命令 - 详细统计风格"""
     chat_id = update.effective_chat.id
-    old_count = len(user_groups[chat_id]['phones'])
-    user_groups[chat_id]['phones'].clear()
+    old_count = len(user_groups[chat_id])
     
-    clear_message = f"""
-🗑️ **数据库已清空！** 🗑️
-═══════════════════════════
+    # 计算总检测次数
+    total_checks = sum(phone_data['count'] for phone_data in user_groups[chat_id].values())
+    
+    user_groups[chat_id].clear()
+    
+    clear_message = f"""🗑️ **数据库已清空！** 🗑️
 
 📊 **清理统计：**
-• 已删除：**{old_count}** 条记录
-• 当前状态：数据库为空
-• 清理时间：{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+• **已删除号码：** {old_count} 个
+• **已删除检测记录：** {total_checks} 次  
+• **当前状态：** 数据库为空
+• **清理时间：** {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
 
-═══════════════════════════
-✨ 可以重新开始记录号码了！
-"""
+✨ **可以重新开始记录号码了！**"""
     
     await update.message.reply_text(clear_message, parse_mode='Markdown')
 
 async def export_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """新增 /export 命令 - v9.5风格导出"""
+    """新增 /export 命令 - 详细统计风格导出"""
     chat_id = update.effective_chat.id
-    all_phones = user_groups[chat_id]['phones']
+    phone_data = user_groups[chat_id]
     
-    if not all_phones:
-        no_data_message = f"""
-📝 **数据导出** 📝
-═══════════════════════════
+    if not phone_data:
+        no_data_message = f"""📝 **数据导出** 📝
 
 ⚠️ **提示：** 当前群组暂无电话号码记录
 
-═══════════════════════════
-💡 发送号码后再尝试导出！
-"""
+💡 **发送号码后再尝试导出！**"""
         await update.message.reply_text(no_data_message, parse_mode='Markdown')
         return
+    
+    all_phones = list(phone_data.keys())
     
     # 按类型分组
     phone_by_type = {}
@@ -310,23 +310,26 @@ async def export_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             phone_by_type[phone_type] = []
         phone_by_type[phone_type].append(phone)
     
-    export_text = f"""
-📋 **号码清单导出** 📋
-═══════════════════════════
+    # 计算总检测次数
+    total_checks = sum(data['count'] for data in phone_data.values())
+    
+    export_text = f"""📋 **号码清单导出** 📋
 
 📊 **总计：** {len(all_phones)} 个号码
+📊 **总检测次数：** {total_checks} 次
 
 """
     
     for phone_type, phones in sorted(phone_by_type.items()):
         export_text += f"**{phone_type}** ({len(phones)}个):\n"
         for i, phone in enumerate(sorted(phones), 1):
-            export_text += f"{i:2d}. `{phone}`\n"
+            count = phone_data[phone]['count']
+            first_user = phone_data[phone]['first_user']
+            export_text += f"{i:2d}. `{phone}` (检测{count}次, {first_user})\n"
         export_text += "\n"
     
     now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    export_text += f"""═══════════════════════════
-📅 导出时间：{now}"""
+    export_text += f"""📅 **导出时间：** {now}"""
     
     await update.message.reply_text(export_text, parse_mode='Markdown')
 
@@ -358,18 +361,22 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(help_message, parse_mode='Markdown')
 
 async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """处理 /stats 命令 - v9.5风格"""
+    """处理 /stats 命令 - 详细统计风格"""
     chat_id = update.effective_chat.id
     chat_title = update.effective_chat.title or "私聊"
     user_name = update.effective_user.first_name or "用户"
     
-    all_phones = user_groups[chat_id]['phones']
+    # 获取所有号码数据
+    phone_data = user_groups[chat_id]
+    all_phones = list(phone_data.keys())
     
     # 按国家分类统计
     country_stats = {}
+    total_checks = 0
     for phone in all_phones:
         country = categorize_phone_number(phone)
         country_stats[country] = country_stats.get(country, 0) + 1
+        total_checks += phone_data[phone]['count']
     
     # 计算统计
     total_count = len(all_phones)
@@ -387,18 +394,17 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     
-    stats_message = f"""
-📊 **统计报告** - v10.1
-═══════════════════════════
+    stats_message = f"""📊 **统计报告** - v10.1
 
-👤 **查询者：** {user_name}
+👤 **查询者：** ⭐ {user_name}
 🏠 **群组：** {chat_title}
 📅 **查询时间：** {now}
 
 📈 **总体统计：**
-• 总电话号码：**{total_count}** 个
-• 马来西亚号码：**{malaysia_count}** 个
-• 中国号码：**{china_count}** 个
+• **总电话号码：** {total_count} 个
+• **总检测次数：** {total_checks} 次
+• **马来西亚号码：** {malaysia_count} 个
+• **中国号码：** {china_count} 个
 
 {country_text}
 
@@ -406,14 +412,12 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 • 🔄 重启次数：{restart_count}
 • 🛡️ 健康检查：已启用
 
-═══════════════════════════
-💡 使用 `/clear` 清空数据库
-"""
+💡 使用 `/clear` 清空数据库"""
     
     await update.message.reply_text(stats_message, parse_mode='Markdown')
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """处理普通消息 - v9.5风格界面"""
+    """处理普通消息 - 详细统计风格界面"""
     try:
         text = update.message.text
         chat_id = update.effective_chat.id
@@ -428,59 +432,71 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         # 初始化聊天数据
         if chat_id not in user_groups:
-            user_groups[chat_id] = {'phones': set()}
-        
-        all_user_phones = user_groups[chat_id]['phones']
+            user_groups[chat_id] = {}
         
         for phone in phone_numbers:
-            # 标准化检查重复
+            # 标准化号码用于比较
             normalized_new = re.sub(r'[^\d+]', '', phone)
-            is_duplicate = False
             
-            for existing_phone in all_user_phones:
+            # 查找是否存在重复
+            existing_phone_key = None
+            for existing_phone in user_groups[chat_id]:
                 normalized_existing = re.sub(r'[^\d+]', '', existing_phone)
                 if normalized_new == normalized_existing:
-                    is_duplicate = True
+                    existing_phone_key = existing_phone
                     break
             
             country_flag = categorize_phone_number(phone).split(' ')[0]  # 获取国旗
             
-            if is_duplicate:
-                # 发现重复号码 - v9.5风格
-                duplicate_message = f"""
-🚨 **发现重复号码！** 🚨
-═══════════════════════════
+            if existing_phone_key:
+                # 发现重复号码 - 更新统计信息
+                phone_data = user_groups[chat_id][existing_phone_key]
+                phone_data['count'] += 1
+                phone_data['last_time'] = current_time
+                phone_data['last_user'] = user.full_name
+                
+                # 创建详细的重复号码消息
+                first_time_str = phone_data['first_time'].strftime('%Y-%m-%d %H:%M:%S')
+                current_time_str = current_time.strftime('%Y-%m-%d %H:%M:%S')
+                
+                duplicate_message = f"""🔰 **发现重复号码！** 🔰
 
 {country_flag} **号码：** `{phone}`
 
-📅 **当前检测：** {current_time.strftime('%Y-%m-%d %H:%M:%S')}
-👤 **当前用户：** {user.full_name}
+📅 **首次添加：** {first_time_str}
+👤 **首次用户：** ⭐ {phone_data['first_user']}
 
-📊 **状态：** 此号码已存在数据库中
+📅 **当前检测：** {current_time_str}
+👤 **当前用户：** ⭐ {user.full_name}
 
-═══════════════════════════
-⚠️ 请注意：此号码已被使用过！
-"""
+📊 **统计信息：**
+📊 **当前总数：** {phone_data['count']} 次
+👤 **涉及用户：** 1 人
+
+⚠️ **请注意：此号码已被使用过！**"""
                 await update.message.reply_text(duplicate_message, parse_mode='Markdown')
-            else:
-                # 首次添加号码 - v9.5风格
-                user_groups[chat_id]['phones'].add(phone)
-                
-                success_message = f"""
-✅ **号码已记录！** ✅
-═══════════════════════════
+                continue  # 跳过后续处理
+            
+            # 首次添加号码
+            user_groups[chat_id][phone] = {
+                'first_time': current_time,
+                'first_user': user.full_name,
+                'count': 1,
+                'last_time': current_time,
+                'last_user': user.full_name
+            }
+            
+            success_message = f"""✅ **号码已记录！** ✅
 
 {country_flag} **号码：** `{phone}`
 
 📅 **添加时间：** {current_time.strftime('%Y-%m-%d %H:%M:%S')}
-👤 **添加用户：** {user.full_name}
+👤 **添加用户：** ⭐ {user.full_name}
 
 🎯 **状态：** 首次添加，无重复！
 
-═══════════════════════════
-✨ 号码已成功加入数据库！
-"""
-                await update.message.reply_text(success_message, parse_mode='Markdown')
+✨ **号码已成功加入数据库！**"""
+            await update.message.reply_text(success_message, parse_mode='Markdown')
         
     except Exception as e:
         logger.error(f"处理消息时出错: {e}")
