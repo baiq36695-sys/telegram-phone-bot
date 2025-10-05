@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-电话号码重复检测机器人 - Render最终修复版
-版本: v3.2 - 纯Telegram Bot，无HTTP服务器
+电话号码重复检测机器人 - Render兼容版
+版本: v3.3 - 兼容旧版本python-telegram-bot
 最后更新: 2025-10-05
 """
 
@@ -13,12 +13,15 @@ from datetime import datetime, timedelta
 from collections import defaultdict
 from typing import Dict, List, Optional
 
-# Telegram相关导入
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import (
-    Application, CommandHandler, MessageHandler, 
-    CallbackQueryHandler, ContextTypes, filters
-)
+# Telegram相关导入 - 兼容旧版本
+try:
+    from telegram.ext import Updater, CommandHandler, MessageHandler, Filters, CallbackQueryHandler
+    from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+    USING_OLD_VERSION = True
+except ImportError:
+    from telegram.ext import Application, CommandHandler, MessageHandler, filters, CallbackQueryHandler, ContextTypes
+    from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+    USING_OLD_VERSION = False
 
 # =============================================================================
 # 配置和常量
@@ -164,10 +167,10 @@ def cleanup_old_data():
     logger.info(f"清理完成: 移除 {len(users_to_remove)} 个过期用户数据")
 
 # =============================================================================
-# Telegram机器人处理函数
+# Telegram机器人处理函数 - 兼容新旧版本
 # =============================================================================
 
-async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+def start_command(update, context):
     """处理/start命令"""
     chat_id = update.effective_chat.id
     bot_stats['total_users'] = len(set(list(user_stats.keys()) + [chat_id]))
@@ -192,9 +195,9 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 现在就开始发送电话号码吧！"""
     
-    await update.message.reply_text(welcome_text, parse_mode='Markdown')
+    update.message.reply_text(welcome_text, parse_mode='Markdown')
 
-async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+def help_command(update, context):
     """处理/help命令"""
     help_text = """📚 **详细使用说明**
 
@@ -221,9 +224,9 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 • 支持各种分隔符(空格、逗号、换行)
 • 自动过滤无效号码"""
     
-    await update.message.reply_text(help_text, parse_mode='Markdown')
+    update.message.reply_text(help_text, parse_mode='Markdown')
 
-async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+def stats_command(update, context):
     """处理/stats命令"""
     chat_id = update.effective_chat.id
     user_stat = user_stats[chat_id]
@@ -259,9 +262,9 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 🕐 统计时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"""
     
-    await update.message.reply_text(stats_text, parse_mode='Markdown')
+    update.message.reply_text(stats_text, parse_mode='Markdown')
 
-async def clear_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+def clear_command(update, context):
     """处理/clear命令"""
     chat_id = update.effective_chat.id
     
@@ -275,16 +278,16 @@ async def clear_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     reply_markup = InlineKeyboardMarkup(keyboard)
     
     current_count = len(phone_data.get(chat_id, {}))
-    await update.message.reply_text(
+    update.message.reply_text(
         f"⚠️ **确认清空数据**\n\n当前存储了 {current_count} 个电话号码\n\n确定要清空所有数据吗？此操作无法撤销。",
         reply_markup=reply_markup,
         parse_mode='Markdown'
     )
 
-async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+def button_callback(update, context):
     """处理按钮回调"""
     query = update.callback_query
-    await query.answer()
+    query.answer()
     
     chat_id = query.effective_chat.id
     
@@ -299,18 +302,18 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 'last_activity': datetime.now()
             }
         
-        await query.edit_message_text(
+        query.edit_message_text(
             "✅ **数据清空完成**\n\n所有电话号码数据已清空，可以重新开始检测。",
             parse_mode='Markdown'
         )
     
     elif query.data == "clear_cancel":
-        await query.edit_message_text(
+        query.edit_message_text(
             "❌ **操作已取消**\n\n数据保持不变，继续使用检测功能。",
             parse_mode='Markdown'
         )
 
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+def handle_message(update, context):
     """处理包含电话号码的消息"""
     chat_id = update.effective_chat.id
     message_text = update.message.text
@@ -323,7 +326,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     phones = extract_phones_from_text(message_text)
     
     if not phones:
-        await update.message.reply_text(
+        update.message.reply_text(
             "🔍 未检测到有效的电话号码\n\n请发送包含电话号码的消息，支持中国🇨🇳和马来西亚🇲🇾格式。"
         )
         return
@@ -368,7 +371,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     response_parts.append(f"\n📊 本次处理: {total_processed} | 累计唯一: {total_unique}")
     
     response_text = "\n".join(response_parts)
-    await update.message.reply_text(response_text, parse_mode='Markdown')
+    update.message.reply_text(response_text, parse_mode='Markdown')
     
     # 定期清理数据
     if bot_stats['total_messages'] % 100 == 0:
@@ -381,7 +384,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 def main():
     """主函数"""
     try:
-        print("🤖 电话号码重复检测机器人 - 纯Telegram版启动中...")
+        print("🤖 电话号码重复检测机器人 - 兼容版启动中...")
         
         # 验证BOT_TOKEN
         if not BOT_TOKEN or BOT_TOKEN == 'YOUR_BOT_TOKEN_HERE':
@@ -394,33 +397,49 @@ def main():
         print("   ✅ 多格式支持 - 已启用") 
         print("   ✅ 实时警告 - 已启用")
         print("   ✅ 详细统计 - 已启用")
-        print("   ✅ 纯机器人模式 - 无端口冲突")
+        print("   ✅ 版本兼容 - 已优化")
         
-        # 创建Telegram应用
-        application = Application.builder().token(BOT_TOKEN).build()
-        
-        # 注册处理器
-        application.add_handler(CommandHandler("start", start_command))
-        application.add_handler(CommandHandler("help", help_command))
-        application.add_handler(CommandHandler("stats", stats_command))
-        application.add_handler(CommandHandler("clear", clear_command))
-        application.add_handler(CallbackQueryHandler(button_callback))
-        application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-        
-        print("✅ 机器人启动成功！")
-        print("🎯 机器人现在完全可用，无端口冲突！")
-        print("🚀 开始接收消息...")
-        
-        # 启动机器人 (阻塞主线程)
-        application.run_polling(
-            poll_interval=1.0,
-            timeout=10,
-            bootstrap_retries=3,
-            read_timeout=30,
-            write_timeout=30,
-            connect_timeout=30,
-            pool_timeout=30
-        )
+        if USING_OLD_VERSION:
+            print("📦 使用旧版本 python-telegram-bot")
+            # 旧版本使用 Updater
+            updater = Updater(BOT_TOKEN, use_context=True)
+            dispatcher = updater.dispatcher
+            
+            # 注册处理器
+            dispatcher.add_handler(CommandHandler("start", start_command))
+            dispatcher.add_handler(CommandHandler("help", help_command))
+            dispatcher.add_handler(CommandHandler("stats", stats_command))
+            dispatcher.add_handler(CommandHandler("clear", clear_command))
+            dispatcher.add_handler(CallbackQueryHandler(button_callback))
+            dispatcher.add_handler(MessageHandler(Filters.text & ~Filters.command, handle_message))
+            
+            print("✅ 机器人启动成功！")
+            print("🎯 机器人现在完全可用，兼容旧版本！")
+            print("🚀 开始接收消息...")
+            
+            # 启动机器人
+            updater.start_polling()
+            updater.idle()
+            
+        else:
+            print("📦 使用新版本 python-telegram-bot")
+            # 新版本使用 Application
+            application = Application.builder().token(BOT_TOKEN).build()
+            
+            # 注册处理器
+            application.add_handler(CommandHandler("start", start_command))
+            application.add_handler(CommandHandler("help", help_command))
+            application.add_handler(CommandHandler("stats", stats_command))
+            application.add_handler(CommandHandler("clear", clear_command))
+            application.add_handler(CallbackQueryHandler(button_callback))
+            application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+            
+            print("✅ 机器人启动成功！")
+            print("🎯 机器人现在完全可用，兼容新版本！")
+            print("🚀 开始接收消息...")
+            
+            # 启动机器人
+            application.run_polling()
         
     except Exception as e:
         logger.error(f"启动机器人时出错: {e}")
