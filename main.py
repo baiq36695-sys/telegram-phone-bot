@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-电话号码重复检测机器人 - Render部署修复版
-版本: v3.0 - 完全修复Render部署问题
+电话号码重复检测机器人 - Render简化部署版
+版本: v3.1 - 移除Flask依赖，使用内置HTTP服务器
 最后更新: 2025-10-05
 """
+
 import os
 import logging
 import re
@@ -13,28 +14,33 @@ import time
 from datetime import datetime, timedelta
 from collections import defaultdict, Counter
 from typing import Dict, List, Set, Optional
-import asyncio
-# Flask相关导入
-from flask import Flask, jsonify
+from http.server import HTTPServer, BaseHTTPRequestHandler
+import json
+
 # Telegram相关导入
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application, CommandHandler, MessageHandler, 
     CallbackQueryHandler, ContextTypes, filters
 )
+
 # =============================================================================
 # 配置和常量
 # =============================================================================
+
 # 日志配置
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO
 )
 logger = logging.getLogger(__name__)
+
 # Telegram Bot Token
 BOT_TOKEN = os.environ.get('BOT_TOKEN', '8424823618:AAFwjIYQH86nKXOiJUybfBRio7sRJl-GUEU')
+
 # Render端口配置
 PORT = int(os.environ.get('PORT', 10000))
+
 # 全局数据存储
 phone_data = {}  # {chat_id: {phone: count}}
 user_stats = defaultdict(lambda: {'total_phones': 0, 'duplicates_found': 0, 'last_activity': datetime.now()})
@@ -44,39 +50,58 @@ bot_stats = {
     'total_duplicates': 0,
     'total_users': 0
 }
+
 # =============================================================================
-# Flask健康检查服务器
+# 简化的HTTP健康检查服务器
 # =============================================================================
-app = Flask(__name__)
-@app.route('/')
-def health_check():
-    """基本健康检查"""
-    return "Telegram Bot is running!", 200
-@app.route('/status')
-def status():
-    """详细状态检查"""
-    uptime = datetime.now() - bot_stats['start_time']
-    return jsonify({
-        'status': 'running',
-        'uptime_seconds': int(uptime.total_seconds()),
-        'total_messages': bot_stats['total_messages'],
-        'total_users': bot_stats['total_users'],
-        'port': PORT
-    })
-@app.route('/health')
-def health():
-    """Render健康检查端点"""
-    return jsonify({'status': 'healthy', 'timestamp': datetime.now().isoformat()})
-def run_flask_server():
-    """在后台线程运行Flask服务器"""
+
+class HealthCheckHandler(BaseHTTPRequestHandler):
+    """简化的健康检查处理器"""
+    
+    def do_GET(self):
+        """处理GET请求"""
+        if self.path == '/' or self.path == '/health':
+            self.send_response(200)
+            self.send_header('Content-type', 'text/plain')
+            self.end_headers()
+            self.wfile.write(b'Telegram Bot is running!')
+        
+        elif self.path == '/status':
+            self.send_response(200)
+            self.send_header('Content-type', 'application/json')
+            self.end_headers()
+            
+            uptime = datetime.now() - bot_stats['start_time']
+            status_data = {
+                'status': 'running',
+                'uptime_seconds': int(uptime.total_seconds()),
+                'total_messages': bot_stats['total_messages'],
+                'total_users': bot_stats['total_users'],
+                'port': PORT
+            }
+            self.wfile.write(json.dumps(status_data).encode())
+        
+        else:
+            self.send_response(404)
+            self.end_headers()
+    
+    def log_message(self, format, *args):
+        """禁用默认日志输出"""
+        pass
+
+def run_health_server():
+    """运行健康检查服务器"""
     try:
-        logger.info(f"启动Flask健康检查服务器在端口 {PORT}")
-        app.run(host='0.0.0.0', port=PORT, debug=False, use_reloader=False)
+        server = HTTPServer(('0.0.0.0', PORT), HealthCheckHandler)
+        logger.info(f"健康检查服务器启动在端口 {PORT}")
+        server.serve_forever()
     except Exception as e:
-        logger.error(f"Flask服务器启动失败: {e}")
+        logger.error(f"健康检查服务器启动失败: {e}")
+
 # =============================================================================
 # 电话号码处理功能
 # =============================================================================
+
 def normalize_phone(phone_str: str) -> Optional[str]:
     """
     标准化电话号码 - 修复版
@@ -137,6 +162,7 @@ def normalize_phone(phone_str: str) -> Optional[str]:
     
     # 其他情况返回None
     return None
+
 def extract_phones_from_text(text: str) -> List[str]:
     """从文本中提取所有可能的电话号码"""
     if not text:
@@ -165,6 +191,7 @@ def extract_phones_from_text(text: str) -> List[str]:
             normalized_phones.append(normalized)
     
     return normalized_phones
+
 def cleanup_old_data():
     """清理超过24小时的旧数据"""
     current_time = datetime.now()
@@ -189,9 +216,11 @@ def cleanup_old_data():
         del phone_data[chat_id]
     
     logger.info(f"清理完成: 移除 {len(users_to_remove)} 个过期用户数据")
+
 # =============================================================================
 # Telegram机器人处理函数
 # =============================================================================
+
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """处理/start命令"""
     chat_id = update.effective_chat.id
@@ -205,39 +234,49 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 • ⚡ 实时处理和警告
 • 📊 详细统计信息
 • 🛡️ 完全隐私保护
+
 📋 **使用方法:**
 直接发送包含电话号码的消息，我会自动检测重复项
+
 🎯 **支持命令:**
 /start - 显示帮助信息
 /stats - 查看统计数据
 /clear - 清空当前数据
 /help - 获取帮助
+
 现在就开始发送电话号码吧！"""
     
     await update.message.reply_text(welcome_text, parse_mode='Markdown')
+
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """处理/help命令"""
     help_text = """📚 **详细使用说明**
+
 🔢 **支持的号码格式:**
 • 中国: +86 138XXXXXXXX 或 138XXXXXXXX
 • 马来西亚: +60 1XXXXXXXX 或 01XXXXXXXX
 • 国际: +[国家码][号码]
+
 ⚡ **检测功能:**
 • 自动识别消息中的所有电话号码
 • 实时检测重复项并发出警告
 • 支持混合格式文本处理
+
 📊 **统计功能:**
 • /stats - 查看个人统计
 • 显示处理总数、重复数量等
+
 🔧 **管理功能:**
 • /clear - 清空当前聊天的所有数据
 • 数据自动清理(24小时)
+
 💡 **使用技巧:**
 • 可以一次发送多个号码
 • 支持各种分隔符(空格、逗号、换行)
 • 自动过滤无效号码"""
     
     await update.message.reply_text(help_text, parse_mode='Markdown')
+
 async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """处理/stats命令"""
     chat_id = update.effective_chat.id
@@ -255,22 +294,27 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     duplicates_in_current = sum(1 for count in current_phones.values() if count > 1)
     
     stats_text = f"""📊 **统计报告**
+
 👤 **个人统计:**
 • 处理号码总数: {user_stat['total_phones']}
 • 发现重复项: {user_stat['duplicates_found']}
 • 最后活动: {user_stat['last_activity'].strftime('%H:%M:%S')}
+
 💾 **当前会话数据:**
 • 唯一号码: {unique_phones}
 • 总记录数: {total_entries}
 • 重复号码: {duplicates_in_current}
+
 🤖 **机器人全局统计:**
 • 运行时间: {hours}小时 {minutes}分钟
 • 处理消息: {bot_stats['total_messages']}
 • 发现重复: {bot_stats['total_duplicates']}
 • 活跃用户: {bot_stats['total_users']}
+
 🕐 统计时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"""
     
     await update.message.reply_text(stats_text, parse_mode='Markdown')
+
 async def clear_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """处理/clear命令"""
     chat_id = update.effective_chat.id
@@ -290,6 +334,7 @@ async def clear_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=reply_markup,
         parse_mode='Markdown'
     )
+
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """处理按钮回调"""
     query = update.callback_query
@@ -318,6 +363,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "❌ **操作已取消**\n\n数据保持不变，继续使用检测功能。",
             parse_mode='Markdown'
         )
+
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """处理包含电话号码的消息"""
     chat_id = update.effective_chat.id
@@ -381,13 +427,15 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # 定期清理数据
     if bot_stats['total_messages'] % 100 == 0:
         cleanup_old_data()
+
 # =============================================================================
 # 主程序
 # =============================================================================
+
 def main():
     """主函数"""
     try:
-        print("🤖 电话号码重复检测机器人 - Render部署版启动中...")
+        print("🤖 电话号码重复检测机器人 - Render简化版启动中...")
         
         # 验证BOT_TOKEN
         if not BOT_TOKEN or BOT_TOKEN == 'YOUR_BOT_TOKEN_HERE':
@@ -400,15 +448,15 @@ def main():
         print("   ✅ 多格式支持 - 已启用") 
         print("   ✅ 实时警告 - 已启用")
         print("   ✅ 详细统计 - 已启用")
-        print("   ✅ Render部署优化 - 已完成")
+        print("   ✅ 简化部署 - 无Flask依赖")
         
-        # 启动Flask健康检查服务器(后台线程)
-        flask_thread = threading.Thread(target=run_flask_server, daemon=True)
-        flask_thread.start()
+        # 启动内置HTTP健康检查服务器(后台线程)
+        health_thread = threading.Thread(target=run_health_server, daemon=True)
+        health_thread.start()
         print(f"🌐 健康检查服务器已启动在端口 {PORT}")
         
-        # 等待Flask服务器启动
-        time.sleep(2)
+        # 等待健康服务器启动
+        time.sleep(1)
         
         # 创建Telegram应用
         application = Application.builder().token(BOT_TOKEN).build()
@@ -440,5 +488,6 @@ def main():
         logger.error(f"启动机器人时出错: {e}")
         print(f"❌ 启动失败: {e}")
         raise
+
 if __name__ == '__main__':
     main()
