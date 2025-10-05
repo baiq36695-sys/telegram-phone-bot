@@ -1,4 +1,4 @@
 python-telegram-bot==13.15
-requests
-phonenumbers
-pytz
+phonenumbers==8.13.23
+requests==2.31.0
+pytz==2023.3
