@@ -47,6 +47,14 @@ logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO
 )
+
+# 禁用HTTP请求的详细日志，只保留机器人重要信息
+logging.getLogger('httpx').setLevel(logging.WARNING)
+logging.getLogger('httpcore').setLevel(logging.WARNING)
+logging.getLogger('urllib3').setLevel(logging.WARNING)
+logging.getLogger('telegram.request').setLevel(logging.WARNING)
+logging.getLogger('telegram.vendor.ptb_urllib3').setLevel(logging.WARNING)
+
 logger = logging.getLogger(__name__)
 
 # 初始化Flask应用
