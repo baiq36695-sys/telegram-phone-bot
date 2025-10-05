@@ -60,8 +60,11 @@ logger = logging.getLogger(__name__)
 # 初始化Flask应用
 app = Flask(__name__)
 
-# 全局变量 - v9.5风格简洁数据结构
-user_groups: Dict[int, Dict[str, Set[str]]] = defaultdict(lambda: defaultdict(set))
+# 全局变量 - v9.5风格简洁数据结构，增加第一次发送者信息
+user_groups: Dict[int, Dict[str, Any]] = defaultdict(lambda: {
+    'phones': set(),      # 存储所有号码
+    'first_senders': {}   # 存储每个标准化号码的第一次发送者信息
+})
 shutdown_event = threading.Event()
 restart_count = 0
 health_check_running = False
@@ -72,14 +75,9 @@ BOT_TOKEN = os.getenv('BOT_TOKEN', '8424823618:AAFwjIYQH86nKXOiJUybfBRio7sRJl-GU
 def extract_phone_numbers(text: str) -> Set[str]:
     """从文本中提取电话号码 - 支持多国格式，特别优化马来西亚格式"""
     patterns = [
-        # 马来西亚电话号码（按优先级排序）
-        r'\+60\s+1[0-9]\s*-?\s*\d{4}\s+\d{4}',       # +60 11-2896 2309 或 +60 11 2896 2309
-        r'\+60\s*1[0-9]\s*-?\s*\d{4}\s*-?\s*\d{4}',  # +60 11-2896-2309 或 +6011-2896-2309
-        r'\+60\s*1[0-9]\d{7,8}',                     # +60 11xxxxxxxx
-        r'\+60\s*[3-9]\s*-?\s*\d{4}\s+\d{4}',        # +60 3-1234 5678 (固话)
-        r'\+60\s*[3-9]\d{7,8}',                      # +60 312345678 (固话)
-        
-        # 其他国际格式
+        # 国际格式优先（这些会被优先处理）
+        r'\+60\s*1[0-9](?:\s*[-\s]?\s*\d{4}\s*[-\s]?\s*\d{4}|\d{7})',  # +60 11-2896 2309 或 +60112896309
+        r'\+60\s*[3-9](?:\s*[-\s]?\s*\d{4}\s*[-\s]?\s*\d{4}|\d{7,8})', # +60 3-1234 5678 (固话)
         r'\+86\s*1[3-9]\d{9}',                       # 中国手机
         r'\+86\s*[2-9]\d{2,3}\s*\d{7,8}',           # 中国固话
         r'\+1\s*[2-9]\d{2}\s*[2-9]\d{2}\s*\d{4}',   # 美国/加拿大
@@ -95,8 +93,6 @@ def extract_phone_numbers(text: str) -> Set[str]:
         r'\+84\s*[3-9]\d{8}',                       # 越南
         r'\+63\s*[2-9]\d{8}',                       # 菲律宾
         r'\+62\s*[1-9]\d{7,10}',                    # 印度尼西亚
-        
-        # 通用国际格式
         r'\+\d{1,4}\s*\d{1,4}\s*\d{1,4}\s*\d{1,9}', # 通用国际格式
         
         # 本地格式（无国际代码）
@@ -107,13 +103,21 @@ def extract_phone_numbers(text: str) -> Set[str]:
     ]
     
     phone_numbers = set()
+    normalized_numbers = set()  # 用于去重
     
     for pattern in patterns:
         matches = re.findall(pattern, text, re.IGNORECASE)
         for match in matches:
             # 清理电话号码：移除多余空格，但保留格式
             cleaned = re.sub(r'\s+', ' ', match.strip())
-            phone_numbers.add(cleaned)
+            
+            # 标准化用于去重检查
+            normalized = re.sub(r'[^\d+]', '', cleaned)
+            
+            # 如果这个标准化号码还没有被添加过，则添加
+            if normalized not in normalized_numbers:
+                phone_numbers.add(cleaned)
+                normalized_numbers.add(normalized)
     
     return phone_numbers
 
@@ -269,7 +273,7 @@ async def clear_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     old_count = len(user_groups[chat_id].get('phones', set()))
     
-    user_groups[chat_id] = {'phones': set()}
+    user_groups[chat_id] = {'phones': set(), 'first_senders': {}}
     
     clear_message = f"""🗑️ **数据库已清空！** 🗑️
 ═══════════════════════════
@@ -408,8 +412,37 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     await update.message.reply_text(stats_message, parse_mode='Markdown')
 
+def normalize_phone_number(phone: str) -> str:
+    """标准化电话号码用于重复检测"""
+    # 移除所有非数字和+号字符
+    normalized = re.sub(r'[^\d+]', '', phone)
+    
+    # 处理马来西亚号码的标准化
+    if normalized.startswith('+60'):
+        # +60 转换为标准格式：去掉+60前缀，保留后续数字
+        # +6011xxxxxxxx -> 11xxxxxxxx
+        # +603xxxxxxxx -> 3xxxxxxxx
+        return normalized[3:]  # 移除 +60
+    elif normalized.startswith('60') and len(normalized) >= 10:
+        # 处理可能缺少+号的情况：60xxxxxxxxx -> xxxxxxxxx
+        return normalized[2:]  # 移除 60
+    elif normalized.startswith('0') and len(normalized) >= 9:
+        # 本地格式：011xxxxxxxx -> 11xxxxxxxx，03xxxxxxxx -> 3xxxxxxxx
+        return normalized[1:]  # 移除前导 0
+    
+    # 处理中国号码的标准化
+    if normalized.startswith('+86'):
+        # +86 转换为标准格式：去掉+86前缀
+        return normalized[3:]  # 移除 +86
+    elif normalized.startswith('86') and len(normalized) >= 13:
+        # 处理可能缺少+号的情况：86xxxxxxxxxxx -> xxxxxxxxxxx
+        return normalized[2:]  # 移除 86
+    
+    # 其他情况保持原样
+    return normalized
+
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """处理普通消息 - v9.5风格界面"""
+    """处理普通消息 - v9.5风格界面，增加第一次发送者信息"""
     try:
         text = update.message.text
         chat_id = update.effective_chat.id
@@ -424,25 +457,36 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         # 初始化聊天数据
         if chat_id not in user_groups:
-            user_groups[chat_id] = {'phones': set()}
+            user_groups[chat_id] = {'phones': set(), 'first_senders': {}}
+        
+        # 确保数据结构完整性
+        if 'phones' not in user_groups[chat_id]:
+            user_groups[chat_id]['phones'] = set()
+        if 'first_senders' not in user_groups[chat_id]:
+            user_groups[chat_id]['first_senders'] = {}
         
         all_user_phones = user_groups[chat_id]['phones']
+        first_senders = user_groups[chat_id]['first_senders']
         
         for phone in phone_numbers:
-            # 标准化检查重复
-            normalized_new = re.sub(r'[^\d+]', '', phone)
+            # 使用改进的标准化函数检查重复
+            normalized_new = normalize_phone_number(phone)
             is_duplicate = False
+            first_sender_info = None
             
-            for existing_phone in all_user_phones:
-                normalized_existing = re.sub(r'[^\d+]', '', existing_phone)
-                if normalized_new == normalized_existing:
-                    is_duplicate = True
-                    break
+            # 检查是否存在重复
+            if normalized_new in first_senders:
+                is_duplicate = True
+                first_sender_info = first_senders[normalized_new]
             
             country_flag = categorize_phone_number(phone).split(' ')[0]  # 获取国旗
             
             if is_duplicate:
-                # 发现重复号码 - v9.5风格
+                # 发现重复号码 - v9.5风格，显示第一次发送者
+                first_user = first_sender_info['user']
+                first_time = first_sender_info['time']
+                original_phone = first_sender_info['original_phone']
+                
                 duplicate_message = f"""🚨 **发现重复号码！** 🚨
 ═══════════════════════════
 
@@ -451,14 +495,22 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 📅 **当前检测：** {current_time.strftime('%Y-%m-%d %H:%M:%S')}
 👤 **当前用户：** {user.full_name}
 
-📊 **状态：** 此号码已存在数据库中
+📊 **首次记录信息：**
+• 👤 **首次发送者：** {first_user}
+• 📅 **首次时间：** {first_time}
+• 📱 **原始格式：** `{original_phone}`
 
 ═══════════════════════════
 ⚠️ 请注意：此号码已被使用过！"""
                 await update.message.reply_text(duplicate_message, parse_mode='Markdown')
             else:
-                # 首次添加号码 - v9.5风格
+                # 首次添加号码 - v9.5风格，记录发送者信息
                 user_groups[chat_id]['phones'].add(phone)
+                user_groups[chat_id]['first_senders'][normalized_new] = {
+                    'user': user.full_name,
+                    'time': current_time.strftime('%Y-%m-%d %H:%M:%S'),
+                    'original_phone': phone
+                }
                 
                 success_message = f"""✅ **号码已记录！** ✅
 ═══════════════════════════
