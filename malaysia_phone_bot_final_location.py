@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-管号机器人 v14.0 - 2025归属地修复版
-专门显示号码归属地信息 - 确保部署成功
-使用Python内置库实现
+管号机器人终极版 v17.0 - 2025完整功能+自动重启版
+包含所有高级功能 + Webhook + 安全性 + 自动重启
 """
 
 import os
@@ -11,18 +10,45 @@ import re
 import json
 import threading
 import time
-import platform
-import urllib.request
-import urllib.parse
+import signal
+import sys
+import subprocess
+import hashlib
+import hmac
 from datetime import datetime, timedelta
 from collections import defaultdict, deque
-from http.server import HTTPServer, BaseHTTPRequestHandler
+from concurrent.futures import ThreadPoolExecutor
+import asyncio
+import logging
+
+# Flask和Telegram相关导入
+try:
+    from flask import Flask, request, jsonify
+    from telegram import Bot, Update
+    from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
+    import requests
+except ImportError as e:
+    print(f"❌ 依赖库缺失: {e}")
+    print("请运行: uv pip install flask python-telegram-bot requests")
+    sys.exit(1)
+
+# 配置日志
+logging.basicConfig(
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    level=logging.INFO,
+    handlers=[
+        logging.FileHandler('bot.log'),
+        logging.StreamHandler()
+    ]
+)
+logger = logging.getLogger(__name__)
 
 # 机器人配置
-BOT_TOKEN = '8424823618:AAFwjIYQH86nKXOiJUybfBRio7sRJl-GUEU'
-TELEGRAM_API = f'https://api.telegram.org/bot{BOT_TOKEN}'
+BOT_TOKEN = "8424823618:AAFwjIYQH86nKXOiJUybfBRio7sRJl-GUEU"
+WEBHOOK_URL = os.environ.get('WEBHOOK_URL', 'https://your-app-name.onrender.com')
+PORT = int(os.environ.get('PORT', 10000))
 
-# 马来西亚手机号码运营商和归属地 - 2025更新版
+# 马来西亚手机号码运营商和归属地 - 2025修正版
 MALAYSIA_MOBILE_PREFIXES = {
     '010': 'DiGi',
     '011': 'DiGi', 
@@ -37,7 +63,7 @@ MALAYSIA_MOBILE_PREFIXES = {
     '020': 'Electcoms'
 }
 
-# 马来西亚固话区号和归属地 - 2025更新版
+# 马来西亚固话区号和归属地 - 2025修正版
 MALAYSIA_LANDLINE_CODES = {
     '03': '雪兰莪/吉隆坡/布城',
     '04': '吉打/槟城',
@@ -101,7 +127,7 @@ class PhoneNumberState:
         # 启动心跳线程
         self.heartbeat_thread = threading.Thread(target=self._heartbeat_worker, daemon=True)
         self.heartbeat_thread.start()
-        print("✅ 管号机器人系统启动（v14.0-2025归属地修复版）")
+        logger.info("✅ 管号机器人系统启动（v17.0-终极版）")
 
     def _heartbeat_worker(self):
         """心跳监控线程"""
@@ -112,7 +138,7 @@ class PhoneNumberState:
                     self.last_heartbeat = datetime.now()
                 time.sleep(300)
             except Exception as e:
-                print(f"心跳监控错误: {e}")
+                logger.error(f"心跳监控错误: {e}")
                 time.sleep(60)
 
     def update_user_info(self, user_id, user_info):
@@ -210,7 +236,7 @@ class PhoneNumberState:
                 'daily_stats': defaultdict(int)
             })
             
-            print("🗑️ 所有数据已清理")
+            logger.info("🗑️ 所有数据已清理")
             return True
 
     def _normalize_phone(self, phone):
@@ -270,7 +296,7 @@ class PhoneNumberState:
                 
                 self.message_count += 1
         except Exception as e:
-            print(f"记录查询统计错误: {e}")
+            logger.error(f"记录查询统计错误: {e}")
 
     def get_user_stats(self, user_id):
         """获取用户统计"""
@@ -301,102 +327,78 @@ class PhoneNumberState:
 phone_state = PhoneNumberState()
 
 def clean_malaysia_phone_number(text):
-    """提取马来西亚电话号码"""
-    if not text:
+    """从文本中提取马来西亚电话号码"""
+    try:
+        patterns = [
+            r'\+60\s*[1-9]\d{1,2}[-\s]*\d{3,4}[-\s]*\d{3,4}',
+            r'60[1-9]\d{1,2}\d{7,9}',
+            r'0[1-9]\d{1,2}[-\s]*\d{3,4}[-\s]*\d{3,4}',
+            r'[1-9]\d{8,10}'
+        ]
+        
+        phone_numbers = []
+        for pattern in patterns:
+            matches = re.findall(pattern, text)
+            phone_numbers.extend(matches)
+        
+        cleaned_phones = []
+        for phone in phone_numbers:
+            cleaned = re.sub(r'[^\d]', '', phone)
+            if 8 <= len(cleaned) <= 12:
+                cleaned_phones.append(phone)
+        
+        return list(set(cleaned_phones))
+    except Exception as e:
+        logger.error(f"提取电话号码错误: {e}")
         return []
-    
-    patterns = [
-        r'\+60\s*[1-9][\d\s\-]{7,12}',
-        r'60\s*[1-9][\d\s\-]{7,12}',
-        r'0\s*[1-9][\d\s\-]{6,11}',
-        r'[1-9][\d\s\-]{6,11}',
-        r'01[0-9][\d\s\-]{6,9}',
-        r'0[2-9]\d[\d\s\-]{5,9}'
-    ]
-    
-    phone_numbers = []
-    for pattern in patterns:
-        matches = re.findall(pattern, text)
-        phone_numbers.extend(matches)
-    
-    cleaned_numbers = []
-    for number in phone_numbers:
-        clean_num = re.sub(r'[\s\-().+]', '', number)
-        clean_num = re.sub(r'[^\d]', '', clean_num)
-        
-        if clean_num.startswith('60'):
-            pass
-        elif clean_num.startswith('0'):
-            clean_num = '60' + clean_num[1:]
-        elif len(clean_num) >= 8:
-            clean_num = '60' + clean_num
-        
-        if 11 <= len(clean_num) <= 13:
-            cleaned_numbers.append(clean_num)
-    
-    return list(set(cleaned_numbers))
 
 def analyze_malaysia_phone(phone_number):
-    """分析马来西亚电话号码并返回详细归属地 - 2025修复版"""
+    """分析马来西亚电话号码"""
     analysis = {
         'original': phone_number,
-        'normalized': '',
         'is_valid': False,
+        'type': '未知',
         'location': '未知归属地',
         'carrier': '未知',
-        'flag': '🇲🇾',
-        'description': '马来西亚号码'
+        'formatted': phone_number
     }
     
     try:
         clean_number = re.sub(r'[^\d]', '', phone_number)
         
         if clean_number.startswith('60'):
-            normalized = clean_number
+            local_number = clean_number[2:]
         elif clean_number.startswith('0'):
-            normalized = '60' + clean_number[1:]
+            local_number = clean_number[1:]
         else:
-            normalized = '60' + clean_number
+            local_number = clean_number
         
-        analysis['normalized'] = normalized
-        
-        if len(normalized) < 11 or len(normalized) > 13:
-            return analysis
-        
-        local_number = normalized[2:]
-        
-        if len(local_number) >= 3:
-            # 手机号码分析 - 新的归属地格式
-            if local_number.startswith('1'):
-                mobile_prefix = local_number[:3]
-                
-                if mobile_prefix in MALAYSIA_MOBILE_PREFIXES:
-                    carrier = MALAYSIA_MOBILE_PREFIXES[mobile_prefix]
-                    analysis['carrier'] = carrier
-                    # *** 关键修复：使用新的归属地显示格式 ***
-                    analysis['location'] = f'📱 {carrier}·全马来西亚'
-                    analysis['is_valid'] = True
-                else:
-                    analysis['carrier'] = '马来西亚手机'
-                    analysis['location'] = '📱 马来西亚手机·未知运营商'
-                    analysis['is_valid'] = True
+        if len(local_number) >= 9:
+            prefix_3 = local_number[:3]
+            prefix_2 = local_number[:2]
             
-            # 固话号码分析 - 新的归属地格式
-            else:
-                area_code = local_number[:2]
-                if area_code == '08' and len(local_number) >= 3:
-                    area_code = local_number[:3]
-                
-                if area_code in MALAYSIA_LANDLINE_CODES:
-                    region = MALAYSIA_LANDLINE_CODES[area_code]
-                    analysis['carrier'] = '固定电话'
-                    # *** 关键修复：使用新的归属地显示格式 ***
-                    analysis['location'] = f'🏠 固话·{region}'
-                    analysis['is_valid'] = True
-                else:
-                    analysis['carrier'] = '固定电话'
-                    analysis['location'] = '🏠 固话·马来西亚'
-                    analysis['is_valid'] = True
+            # 检查手机号码
+            if prefix_3 in MALAYSIA_MOBILE_PREFIXES:
+                analysis['is_valid'] = True
+                analysis['type'] = '手机'
+                analysis['carrier'] = MALAYSIA_MOBILE_PREFIXES[prefix_3]
+                analysis['location'] = f"📱 {analysis['carrier']}·全马来西亚"
+                analysis['formatted'] = f"+60 {prefix_3}-{local_number[3:6]}-{local_number[6:]}"
+            
+            # 检查固话
+            elif prefix_3 in MALAYSIA_LANDLINE_CODES:
+                analysis['is_valid'] = True
+                analysis['type'] = '固话'
+                analysis['carrier'] = '固话'
+                analysis['location'] = f"🏠 {MALAYSIA_LANDLINE_CODES[prefix_3]}"
+                analysis['formatted'] = f"+60 {prefix_3}-{local_number[3:6]}-{local_number[6:]}"
+            
+            elif prefix_2 in MALAYSIA_LANDLINE_CODES:
+                analysis['is_valid'] = True
+                analysis['type'] = '固话'
+                analysis['carrier'] = '固话'
+                analysis['location'] = f"🏠 {MALAYSIA_LANDLINE_CODES[prefix_2]}"
+                analysis['formatted'] = f"+60 {prefix_2}-{local_number[2:6]}-{local_number[6:]}"
         
         if analysis['location'] == '未知归属地' and 8 <= len(local_number) <= 11:
             analysis['location'] = '🇲🇾 马来西亚·未知运营商'
@@ -404,54 +406,40 @@ def analyze_malaysia_phone(phone_number):
             analysis['carrier'] = '未知运营商'
     
     except Exception as e:
-        print(f"马来西亚电话号码分析错误: {e}")
+        logger.error(f"马来西亚电话号码分析错误: {e}")
     
     return analysis
 
-def send_telegram_message(chat_id, text, parse_mode='Markdown'):
-    """发送Telegram消息"""
-    try:
-        max_length = 4000
-        if len(text) > max_length:
-            parts = [text[i:i+max_length] for i in range(0, len(text), max_length)]
-            for part in parts:
-                send_single_message(chat_id, part, parse_mode)
-                time.sleep(0.5)
-        else:
-            send_single_message(chat_id, text, parse_mode)
-    except Exception as e:
-        print(f"发送消息错误: {e}")
+# Flask应用和Telegram设置
+app = Flask(__name__)
+application = None
+executor = ThreadPoolExecutor(max_workers=5, thread_name_prefix="telegram-worker")
 
-def send_single_message(chat_id, text, parse_mode='Markdown'):
-    """发送单条消息"""
-    try:
-        data = {
-            'chat_id': chat_id,
-            'text': text,
-            'parse_mode': parse_mode
-        }
-        
-        params = urllib.parse.urlencode(data).encode('utf-8')
-        
-        req = urllib.request.Request(
-            f'{TELEGRAM_API}/sendMessage',
-            data=params,
-            headers={'Content-Type': 'application/x-www-form-urlencoded'}
-        )
-        
-        with urllib.request.urlopen(req, timeout=10) as response:
-            result = json.loads(response.read().decode('utf-8'))
-            if not result.get('ok'):
-                print(f"Telegram API错误: {result}")
-                
-    except Exception as e:
-        print(f"发送单条消息错误: {e}")
+# 频率限制
+request_times = {}
+RATE_LIMIT = 15  # 每分钟最多15个请求
 
-def handle_start_command(chat_id, user_id):
-    """处理/start命令"""
+def is_rate_limited(user_id):
+    """检查是否超过频率限制"""
+    now = time.time()
+    user_requests = request_times.get(user_id, [])
+    
+    # 清理1分钟前的记录
+    user_requests = [req_time for req_time in user_requests if now - req_time < 60]
+    
+    if len(user_requests) >= RATE_LIMIT:
+        return True
+    
+    user_requests.append(now)
+    request_times[user_id] = user_requests
+    return False
+
+# Telegram命令处理函数
+async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
     phone_state.record_query(user_id)
     
-    welcome_text = f"""🗣️ **欢迎使用管号机器人!** [v14.0-2025归属地修复版 ✅]
+    welcome_text = f"""🗣️ **欢迎使用管号机器人!** [v17.0-终极版 🚀]
 
 🔍 **专业功能:**
 • 📱 马来西亚手机和固话识别  
@@ -459,6 +447,7 @@ def handle_start_command(chat_id, user_id):
 • 🔄 重复号码检测及关联信息
 • 👥 用户追踪和统计
 • 📍 **精准归属地显示（已修复！）**
+• 🔒 **安全防护和自动重启**
 
 📱 **支持的马来西亚号码格式:**
 ```
@@ -476,11 +465,142 @@ def handle_start_command(chat_id, user_id):
 
 ⚠️ **2025年10月更新:** 归属地显示功能已完全修复！"""
 
-    send_telegram_message(chat_id, welcome_text)
+    await update.message.reply_text(welcome_text, parse_mode='Markdown')
 
-def handle_phone_message(chat_id, user_id, message_text, user_info=None):
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    phone_state.record_query(user_id)
+    
+    help_text = """🗣️ **管号机器人 - 帮助** [v17.0-终极版 🚀]
+
+🔍 **主要功能:**
+• 检测马来西亚手机和固话号码
+• 记录首次出现时间
+• 检测重复号码及关联信息
+• 用户追踪和统计
+• **显示精准归属地 📍（已修复）**
+• **自动重启和故障恢复**
+
+📱 **支持格式:**
+• +60 11-6852 8782（国际格式）
+• 011-6852 8782（本地手机）
+• 03-1234 5678（固话）
+• 60116852782（纯数字）
+
+⚡ **快速命令:**
+• /start - 开始使用
+• /help - 显示帮助
+• /stats - 查看个人统计
+• /status - 系统状态
+• /clear - 清理所有数据 🗑️
+
+💡 **使用方法:**
+直接发送包含马来西亚电话号码的消息即可自动检测和分析!
+
+🔥 **最新功能:** 
+• 详细运营商显示（📱 Maxis·全马来西亚）
+• 固话归属地显示（🏠 雪兰莪/吉隆坡/布城）
+• Webhook部署模式，更稳定
+• 自动故障恢复机制
+
+⚠️ **2025年10月更新:** 终极版本，包含所有功能！"""
+
+    await update.message.reply_text(help_text, parse_mode='Markdown')
+
+async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    phone_state.record_query(user_id)
+    user_data = phone_state.get_user_stats(user_id)
+    
+    first_seen = datetime.fromisoformat(user_data['first_seen'])
+    days_using = (datetime.now() - first_seen).days + 1
+    display_name = phone_state.get_user_display_name(user_id)
+    
+    stats_text = f"""📊 **您的使用统计**
+
+👤 **用户信息:**
+• 用户名: {display_name}
+• 首次使用: {first_seen.strftime('%Y-%m-%d %H:%M:%S')}
+• 使用天数: {days_using} 天
+
+🔍 **查询统计:**
+• 总查询次数: {user_data['query_count']:,} 次
+• 今日查询: {user_data['queries_today']} 次
+• 发现号码: {user_data['phone_numbers_found']:,} 个
+• 平均每日: {user_data['query_count']/days_using:.1f} 次"""
+    
+    await update.message.reply_text(stats_text, parse_mode='Markdown')
+
+async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    phone_state.record_query(user_id)
+    
+    system_status = phone_state.get_system_status()
+    global_stats = phone_state.get_global_stats()
+    
+    status_text = f"""🔧 **系统状态报告**
+
+⚙️ **系统信息:**
+• 运行时间: {system_status['uptime']}
+• 处理消息: {system_status['message_count']:,} 条
+• 平台: Webhook模式 (云端)
+
+📊 **全局统计:**
+• 总用户: {global_stats['total_users']:,} 人
+• 总查询: {global_stats['total_queries']:,} 次
+• 注册号码: {global_stats['total_registered_phones']:,} 个
+• 重复检测: {global_stats['total_duplicates']:,} 次
+
+💡 **版本信息:**
+• 机器人版本: **v17.0-终极版** 🚀
+• 更新时间: 2025年10月
+• 特色功能: 全功能集成+自动重启
+• 部署模式: Webhook + 安全防护"""
+    
+    await update.message.reply_text(status_text, parse_mode='Markdown')
+
+async def clear_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    phone_state.record_query(user_id)
+    
+    try:
+        success = phone_state.clear_all_data()
+        if success:
+            clear_text = """🗑️ **数据清理完成**
+
+✅ **已清理的内容:**
+• 所有电话号码记录
+• 所有用户统计数据  
+• 所有重复检测历史
+• 系统统计信息
+
+🔄 **系统状态:** 已重置，可重新开始使用
+
+💡 可以继续发送电话号码进行检测!"""
+        else:
+            clear_text = "❌ 数据清理失败，请重试。"
+        
+        await update.message.reply_text(clear_text, parse_mode='Markdown')
+        
+    except Exception as e:
+        logger.error(f"清理数据错误: {e}")
+        await update.message.reply_text("❌ 清理数据时发生错误，请重试。", parse_mode='Markdown')
+
+async def handle_phone_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """处理包含电话号码的消息"""
     try:
+        user_id = update.effective_user.id
+        user_info = update.effective_user.to_dict()
+        message_text = update.message.text
+        
+        # 频率限制检查
+        if is_rate_limited(user_id):
+            await update.message.reply_text(
+                "⚠️ 请求过于频繁，请稍后再试。（每分钟最多15次查询）",
+                parse_mode='Markdown'
+            )
+            return
+        
         if user_info:
             phone_state.update_user_info(user_id, user_info)
         
@@ -496,7 +616,7 @@ def handle_phone_message(chat_id, user_id, message_text, user_info=None):
 • 60116852782
 
 请发送马来西亚电话号码!"""
-            send_telegram_message(chat_id, response_text)
+            await update.message.reply_text(response_text, parse_mode='Markdown')
             return
         
         analyses = []
@@ -513,7 +633,7 @@ def handle_phone_message(chat_id, user_id, message_text, user_info=None):
 
         phone_state.record_query(user_id, len(phone_numbers), list(carriers_found))
 
-        # *** 关键修复：构建响应（使用新的归属地格式）***
+        # 构建响应
         if len(analyses) == 1:
             analysis = analyses[0]
             duplicate_info = analysis['duplicate_info']
@@ -567,252 +687,277 @@ def handle_phone_message(chat_id, user_id, message_text, user_info=None):
                 else:
                     response_text += f"\n✅ 新号码: 首次记录!\n\n"
         
-        send_telegram_message(chat_id, response_text)
-        
-    except Exception as e:
-        print(f"处理电话号码消息错误: {e}")
-        send_telegram_message(chat_id, "❌ 处理错误，请重试。")
-
-def handle_clear_command(chat_id, user_id):
-    """处理/clear命令"""
-    phone_state.record_query(user_id)
-    
-    try:
-        success = phone_state.clear_all_data()
-        if success:
-            clear_text = """🗑️ **数据清理完成**
-
-✅ **已清理的内容:**
-• 所有电话号码记录
-• 所有用户统计数据  
-• 所有重复检测历史
-• 系统统计信息
-
-🔄 **系统状态:** 已重置，可重新开始使用
-
-💡 可以继续发送电话号码进行检测!"""
+        # 分块发送长消息
+        max_length = 4000
+        if len(response_text) > max_length:
+            parts = [response_text[i:i+max_length] for i in range(0, len(response_text), max_length)]
+            for part in parts:
+                await update.message.reply_text(part, parse_mode='Markdown')
+                await asyncio.sleep(0.5)
         else:
-            clear_text = "❌ 数据清理失败，请重试。"
-        
-        send_telegram_message(chat_id, clear_text)
+            await update.message.reply_text(response_text, parse_mode='Markdown')
         
     except Exception as e:
-        print(f"清理数据错误: {e}")
-        send_telegram_message(chat_id, "❌ 清理数据时发生错误，请重试。")
+        logger.error(f"处理电话号码消息错误: {e}")
+        await update.message.reply_text("❌ 处理错误，请重试。", parse_mode='Markdown')
 
-def handle_help_command(chat_id, user_id):
-    """处理/help命令"""
-    phone_state.record_query(user_id)
-    
-    help_text = """🗣️ **管号机器人 - 帮助** [v14.0-2025归属地修复版 ✅]
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """处理消息"""
+    try:
+        text = update.message.text.strip()
+        
+        # 检查是否包含数字（可能是电话号码）
+        if any(char.isdigit() for char in text):
+            await handle_phone_message(update, context)
+        else:
+            response = "❌ 请发送一个有效的马来西亚电话号码\n\n使用 /help 查看使用说明"
+            await update.message.reply_text(response, parse_mode='Markdown')
+        
+    except Exception as e:
+        logger.error(f"处理消息时出错: {e}")
+        await update.message.reply_text(
+            "❌ 系统暂时繁忙，请稍后重试。",
+            parse_mode='Markdown'
+        )
 
-🔍 **主要功能:**
-• 检测马来西亚手机和固话号码
-• 记录首次出现时间
-• 检测重复号码及关联信息
-• 用户追踪和统计
-• **显示精准归属地 📍（已修复）**
+def init_telegram_app():
+    """初始化Telegram应用"""
+    global application
+    try:
+        application = Application.builder().token(BOT_TOKEN).build()
+        
+        # 添加处理器
+        application.add_handler(CommandHandler("start", start_command))
+        application.add_handler(CommandHandler("help", help_command))
+        application.add_handler(CommandHandler("stats", stats_command))
+        application.add_handler(CommandHandler("status", status_command))
+        application.add_handler(CommandHandler("clear", clear_command))
+        application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+        
+        logger.info("✅ Telegram应用初始化成功")
+        return True
+    except Exception as e:
+        logger.error(f"❌ Telegram应用初始化失败: {e}")
+        return False
 
-📱 **支持格式:**
-• +60 11-6852 8782（国际格式）
-• 011-6852 8782（本地手机）
-• 03-1234 5678（固话）
-• 60116852782（纯数字）
+def process_telegram_update(update_data):
+    """在线程池中处理Telegram更新"""
+    try:
+        if not application:
+            logger.error("Telegram应用未初始化")
+            return
+        
+        # 创建Update对象
+        update = Update.de_json(update_data, application.bot)
+        
+        if update:
+            # 在新的事件循环中处理更新
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            try:
+                loop.run_until_complete(application.process_update(update))
+            finally:
+                loop.close()
+        
+    except Exception as e:
+        logger.error(f"处理Telegram更新时出错: {e}")
 
-⚡ **快速命令:**
-• /start - 开始使用
-• /help - 显示帮助
-• /stats - 查看个人统计
-• /status - 系统状态
-• /clear - 清理所有数据 🗑️
+def auto_set_webhook():
+    """自动设置webhook"""
+    try:
+        webhook_endpoint = f"{WEBHOOK_URL}/webhook"
+        url = f"https://api.telegram.org/bot{BOT_TOKEN}/setWebhook"
+        
+        data = {
+            'url': webhook_endpoint,
+            'max_connections': 40,
+            'allowed_updates': ['message']
+        }
+        
+        response = requests.post(url, data=data, timeout=30)
+        result = response.json()
+        
+        if result.get('ok'):
+            logger.info(f"✅ Webhook设置成功: {webhook_endpoint}")
+            return True
+        else:
+            logger.error(f"❌ Webhook设置失败: {result}")
+            return False
+            
+    except Exception as e:
+        logger.error(f"设置webhook时出错: {e}")
+        return False
 
-💡 **使用方法:**
-直接发送包含马来西亚电话号码的消息即可自动检测和分析!
+# Flask路由
+@app.route('/webhook', methods=['POST'])
+def webhook():
+    """处理Telegram webhook"""
+    try:
+        # 获取JSON数据
+        update_data = request.get_json()
+        
+        if update_data:
+            # 在线程池中异步处理更新
+            executor.submit(process_telegram_update, update_data)
+        
+        return 'OK', 200
+        
+    except Exception as e:
+        logger.error(f"Webhook处理错误: {e}")
+        return 'Error', 500
 
-🔥 **最新功能:** 
-• 详细运营商显示（📱 Maxis·全马来西亚）
-• 固话归属地显示（🏠 固话·雪兰莪/吉隆坡/布城）
-
-⚠️ **2025年10月更新:** 归属地显示功能已完全修复！"""
-
-    send_telegram_message(chat_id, help_text)
-
-def handle_stats_command(chat_id, user_id):
-    """处理/stats命令"""
-    phone_state.record_query(user_id)
-    user_data = phone_state.get_user_stats(user_id)
-    
-    first_seen = datetime.fromisoformat(user_data['first_seen'])
-    days_using = (datetime.now() - first_seen).days + 1
-    display_name = phone_state.get_user_display_name(user_id)
-    
-    stats_text = f"""📊 **您的使用统计**
-
-👤 **用户信息:**
-• 用户名: {display_name}
-• 首次使用: {first_seen.strftime('%Y-%m-%d %H:%M:%S')}
-• 使用天数: {days_using} 天
-
-🔍 **查询统计:**
-• 总查询次数: {user_data['query_count']:,} 次
-• 今日查询: {user_data['queries_today']} 次
-• 发现号码: {user_data['phone_numbers_found']:,} 个
-• 平均每日: {user_data['query_count']/days_using:.1f} 次"""
-    
-    send_telegram_message(chat_id, stats_text)
-
-def handle_status_command(chat_id, user_id):
-    """处理/status命令"""
-    phone_state.record_query(user_id)
-    
+@app.route('/')
+def index():
     system_status = phone_state.get_system_status()
     global_stats = phone_state.get_global_stats()
     
-    status_text = f"""🔧 **系统状态报告**
-
-⚙️ **系统信息:**
-• 运行时间: {system_status['uptime']}
-• 处理消息: {system_status['message_count']:,} 条
-• 平台: Linux (云端)
-
-📊 **全局统计:**
-• 总用户: {global_stats['total_users']:,} 人
-• 总查询: {global_stats['total_queries']:,} 次
-• 注册号码: {global_stats['total_registered_phones']:,} 个
-• 重复检测: {global_stats['total_duplicates']:,} 次
-
-💡 **版本信息:**
-• 机器人版本: **v14.0-2025归属地修复版** ✅
-• 更新时间: 2025年10月
-• 特色功能: 精准归属地显示（已修复）
-• 修复内容: 手机显示运营商，固话显示地区"""
+    return f'''
+    <h1>🇲🇾 马来西亚手机号归属地机器人</h1>
+    <p><strong>终极版 v17.0 运行中 🚀</strong></p>
+    <p>当前时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</p>
+    <p>运行时间: {system_status['uptime']}</p>
+    <p>Webhook URL: {WEBHOOK_URL}/webhook</p>
     
-    send_telegram_message(chat_id, status_text)
+    <h2>📊 统计信息</h2>
+    <ul>
+        <li>总用户: {global_stats['total_users']:,} 人</li>
+        <li>总查询: {global_stats['total_queries']:,} 次</li>
+        <li>注册号码: {global_stats['total_registered_phones']:,} 个</li>
+        <li>重复检测: {global_stats['total_duplicates']:,} 次</li>
+        <li>处理消息: {system_status['message_count']:,} 条</li>
+    </ul>
+    
+    <h2>✅ 功能状态</h2>
+    <ul>
+        <li>✅ 运营商数据已修正</li>
+        <li>✅ 号码注册表</li>
+        <li>✅ 重复检测</li>
+        <li>✅ 用户统计</li>
+        <li>✅ 系统监控</li>
+        <li>✅ 线程池管理</li>
+        <li>✅ 频率限制保护</li>
+        <li>✅ 自动webhook设置</li>
+        <li>✅ 异常重启机制</li>
+    </ul>
+    '''
 
-class TelegramWebhookHandler(BaseHTTPRequestHandler):
-    """处理Telegram Webhook请求"""
-    
-    def do_POST(self):
-        try:
-            content_length = int(self.headers['Content-Length'])
-            post_data = self.rfile.read(content_length)
-            update = json.loads(post_data.decode('utf-8'))
-            
-            if 'message' in update:
-                message = update['message']
-                chat_id = message['chat']['id']
-                user_id = message['from']['id']
-                user_info = message['from']
-                
-                if 'text' in message:
-                    text = message['text'].strip()
-                    
-                    if text.startswith('/start'):
-                        handle_start_command(chat_id, user_id)
-                    elif text.startswith('/help'):
-                        handle_help_command(chat_id, user_id)
-                    elif text.startswith('/stats'):
-                        handle_stats_command(chat_id, user_id)
-                    elif text.startswith('/status'):
-                        handle_status_command(chat_id, user_id)
-                    elif text.startswith('/clear'):
-                        handle_clear_command(chat_id, user_id)
-                    else:
-                        handle_phone_message(chat_id, user_id, text, user_info)
-            
-            self.send_response(200)
-            self.send_header('Content-type', 'application/json')
-            self.end_headers()
-            self.wfile.write(b'{"ok": true}')
-            
-        except Exception as e:
-            print(f"Webhook处理错误: {e}")
-            self.send_response(500)
-            self.end_headers()
-    
-    def do_GET(self):
-        """处理健康检查请求"""
-        try:
-            system_status = phone_state.get_system_status()
-            
-            response_data = {
-                'status': 'healthy',
-                'uptime': system_status['uptime'],
-                'message_count': system_status['message_count'],
-                'version': 'v14.0-2025归属地修复版'
-            }
-            
-            self.send_response(200)
-            self.send_header('Content-type', 'application/json')
-            self.end_headers()
-            self.wfile.write(json.dumps(response_data, ensure_ascii=False).encode('utf-8'))
-            
-        except Exception as e:
-            print(f"健康检查错误: {e}")
-            self.send_response(500)
-            self.end_headers()
-    
-    def log_message(self, format, *args):
-        """禁用默认日志"""
-        pass
-
-def setup_webhook():
-    """设置Webhook"""
+@app.route('/health')
+def health():
+    """健康检查端点"""
     try:
-        render_url = os.environ.get('RENDER_EXTERNAL_URL')
-        if not render_url:
-            print("❌ 未找到RENDER_EXTERNAL_URL环境变量")
-            return False
-        
-        webhook_url = f"{render_url}/webhook"
-        
-        data = urllib.parse.urlencode({'url': webhook_url}).encode('utf-8')
-        req = urllib.request.Request(
-            f'{TELEGRAM_API}/setWebhook',
-            data=data,
-            headers={'Content-Type': 'application/x-www-form-urlencoded'}
-        )
-        
-        with urllib.request.urlopen(req, timeout=10) as response:
-            result = json.loads(response.read().decode('utf-8'))
-            if result.get('ok'):
-                print(f"✅ Webhook设置成功: {webhook_url}")
-                return True
-            else:
-                print(f"❌ Webhook设置失败: {result}")
-                return False
-                
+        system_status = phone_state.get_system_status()
+        return jsonify({
+            'status': 'healthy',
+            'timestamp': datetime.now().isoformat(),
+            'version': 'v17.0-终极版',
+            'uptime': system_status['uptime'],
+            'message_count': system_status['message_count'],
+            'telegram_app': application is not None,
+            'heartbeat_count': system_status['heartbeat_count']
+        })
     except Exception as e:
-        print(f"❌ 设置Webhook错误: {e}")
+        logger.error(f"健康检查错误: {e}")
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+@app.route('/stats')
+def stats():
+    """统计信息端点"""
+    try:
+        global_stats = phone_state.get_global_stats()
+        system_status = phone_state.get_system_status()
+        
+        return jsonify({
+            'global_stats': global_stats,
+            'system_status': system_status,
+            'active_requests': len(request_times),
+            'version': 'v17.0-终极版'
+        })
+    except Exception as e:
+        logger.error(f"获取统计信息错误: {e}")
+        return jsonify({'error': str(e)}), 500
+
+# 自动重启机制
+class AutoRestarter:
+    """自动重启管理器"""
+    def __init__(self):
+        self.restart_count = 0
+        self.max_restarts = 5
+        self.last_restart = None
+        
+    def should_restart(self, error):
+        """判断是否应该重启"""
+        now = datetime.now()
+        
+        # 如果是第一次错误，或距离上次重启超过1小时
+        if self.last_restart is None or (now - self.last_restart).seconds > 3600:
+            self.restart_count = 0
+        
+        if self.restart_count < self.max_restarts:
+            self.restart_count += 1
+            self.last_restart = now
+            logger.warning(f"准备重启 ({self.restart_count}/{self.max_restarts}): {error}")
+            return True
+        
+        logger.error(f"达到最大重启次数，停止重启: {error}")
         return False
+    
+    def restart_app(self):
+        """重启应用"""
+        try:
+            logger.info("🔄 执行自动重启...")
+            os.execv(sys.executable, ['python'] + sys.argv)
+        except Exception as e:
+            logger.error(f"重启失败: {e}")
 
-def main():
-    """主程序"""
-    print("🚀 启动管号机器人（v14.0-2025归属地修复版）...")
-    
-    port = int(os.environ.get('PORT', 8000))
-    
+# 全局重启器
+auto_restarter = AutoRestarter()
+
+def signal_handler(signum, frame):
+    """信号处理器"""
+    logger.info(f"🛑 接收到信号 {signum}，准备关闭...")
     try:
-        if setup_webhook():
-            print("✅ Webhook配置完成")
-        else:
-            print("⚠️  Webhook配置失败，但继续运行")
-        
-        server = HTTPServer(('0.0.0.0', port), TelegramWebhookHandler)
-        print(f"🌐 HTTP服务器启动在端口 {port}")
-        print(f"🔧 平台: {platform.platform()}")
-        print(f"🐍 Python: {platform.python_version()}")
-        print("✅ 系统就绪，等待消息...")
-        print("🔥 归属地显示功能已修复 - 2025年10月版本")
-        
-        server.serve_forever()
-        
-    except KeyboardInterrupt:
-        print("\n⏹️  收到停止信号")
-    except Exception as e:
-        print(f"❌ 程序错误: {e}")
+        executor.shutdown(wait=True)
+        logger.info("✅ 清理完成")
     finally:
-        print("🔄 程序结束")
+        sys.exit(0)
+
+# 注册信号处理器
+signal.signal(signal.SIGINT, signal_handler)
+signal.signal(signal.SIGTERM, signal_handler)
 
 if __name__ == '__main__':
-    main()
+    logger.info("🚀 启动终极版Webhook机器人...")
+    logger.info(f"端口: {PORT}")
+    logger.info(f"Webhook URL: {WEBHOOK_URL}")
+    
+    try:
+        # 初始化Telegram应用
+        if not init_telegram_app():
+            logger.error("❌ Telegram应用初始化失败，退出")
+            sys.exit(1)
+        
+        # 自动设置webhook（如果配置了正确的URL）
+        if WEBHOOK_URL != 'https://your-app-name.onrender.com':
+            logger.info("🔧 自动设置webhook...")
+            if auto_set_webhook():
+                logger.info("✅ Webhook设置成功")
+            else:
+                logger.warning("⚠️ Webhook设置失败，请检查配置")
+        else:
+            logger.warning("⚠️ 请配置正确的WEBHOOK_URL环境变量")
+        
+        logger.info("✅ 所有系统就绪，启动Flask服务器...")
+        
+        # 启动Flask应用
+        app.run(host='0.0.0.0', port=PORT, debug=False, threaded=True)
+        
+    except Exception as e:
+        logger.error(f"❌ 程序运行错误: {e}")
+        if auto_restarter.should_restart(e):
+            auto_restarter.restart_app()
+        else:
+            logger.error("🛑 程序异常退出")
+            sys.exit(1)
+    finally:
+        logger.info("🔄 程序结束")
+        executor.shutdown(wait=True)
