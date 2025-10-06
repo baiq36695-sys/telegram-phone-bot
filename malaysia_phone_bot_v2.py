@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-马来西亚电话号码专用检测机器人 v10.3 - 修复版
-专注马来西亚号码分析，包含重复检测和时间追踪功能
+马来西亚电话号码专用检测机器人 v10.4 - 隐私版
+只显示时间和重复信息，不显示具体号码内容
 修复了号码识别问题，使用Python内置库实现
 """
 
@@ -51,7 +51,7 @@ class MalaysiaPhoneState:
         self.message_count = 0
         
         # 全局号码注册表 - 记录每个号码的首次出现
-        self.phone_registry = {}  # {标准化号码: {'first_seen': datetime, 'count': int, 'users': set}}
+        self.phone_registry = {}  # {标准化号码: {'first_seen': datetime, 'count': int, 'users': set, 'first_user': user_id}}
         
         # 用户数据
         self.user_data = defaultdict(lambda: {
@@ -64,8 +64,12 @@ class MalaysiaPhoneState:
             'phone_history': deque(maxlen=100),
             'hourly_stats': defaultdict(int),
             'carrier_stats': defaultdict(int),
-            'daily_queries': defaultdict(int)
+            'daily_queries': defaultdict(int),
+            'username': None  # 存储用户名
         })
+        
+        # 用户ID到用户名的映射
+        self.user_names = {}  # {user_id: username or first_name}
         
         self.global_stats = {
             'total_queries': 0,
@@ -81,7 +85,7 @@ class MalaysiaPhoneState:
         # 启动心跳线程
         self.heartbeat_thread = threading.Thread(target=self._heartbeat_worker, daemon=True)
         self.heartbeat_thread.start()
-        print("✅ 马来西亚电话号码检测系统启动（修复版）")
+        print("✅ 马来西亚电话号码检测系统启动（隐私版）")
 
     def _heartbeat_worker(self):
         """心跳监控线程"""
@@ -94,6 +98,22 @@ class MalaysiaPhoneState:
             except Exception as e:
                 print(f"心跳监控错误: {e}")
                 time.sleep(60)
+
+    def update_user_info(self, user_id, user_info):
+        """更新用户信息"""
+        with self._lock:
+            # 提取用户名或姓名
+            username = user_info.get('username')
+            first_name = user_info.get('first_name', '')
+            last_name = user_info.get('last_name', '')
+            
+            if username:
+                display_name = f"@{username}"
+            else:
+                display_name = f"{first_name} {last_name}".strip() or f"用户{user_id}"
+            
+            self.user_names[user_id] = display_name
+            self.user_data[user_id]['username'] = display_name
 
     def register_phone_number(self, phone_number, user_id):
         """注册电话号码并检查重复"""
@@ -108,25 +128,34 @@ class MalaysiaPhoneState:
                 registry_entry['users'].add(user_id)
                 self.global_stats['total_duplicates'] += 1
                 
+                # 获取首次发送者的用户名
+                first_user_id = registry_entry['first_user']
+                first_user_name = self.user_names.get(first_user_id, f"用户{first_user_id}")
+                
                 return {
                     'is_duplicate': True,
                     'first_seen': registry_entry['first_seen'],
                     'occurrence_count': registry_entry['count'],
-                    'total_users': len(registry_entry['users'])
+                    'total_users': len(registry_entry['users']),
+                    'first_user_name': first_user_name,
+                    'first_user_id': first_user_id
                 }
             else:
                 # 新号码，首次记录
                 self.phone_registry[normalized_phone] = {
                     'first_seen': current_time,
                     'count': 1,
-                    'users': {user_id}
+                    'users': {user_id},
+                    'first_user': user_id
                 }
                 
                 return {
                     'is_duplicate': False,
                     'first_seen': current_time,
                     'occurrence_count': 1,
-                    'total_users': 1
+                    'total_users': 1,
+                    'first_user_name': self.user_names.get(user_id, f"用户{user_id}"),
+                    'first_user_id': user_id
                 }
 
     def _normalize_phone(self, phone):
@@ -429,14 +458,13 @@ def handle_start_command(chat_id, user_id):
     """处理/start命令"""
     phone_state.record_query(user_id)
     
-    welcome_text = f"""🇲🇾 **欢迎使用马来西亚电话号码专用检测机器人！（修复版）** 
+    welcome_text = f"""🇲🇾 **欢迎使用马来西亚电话号码专用检测机器人！（隐私版）** 
 
 🔍 **专业功能：**
 • 📱 马来西亚手机和固话识别
-• 🏢 详细运营商信息（Maxis、Celcom、DiGi等）
-• 🗺️ 地区识别（州属区号）
 • ⏰ 首次出现时间记录
-• 🔄 重复号码检测
+• 🔄 重复号码检测及关联信息
+• 🔒 隐私保护：不显示具体号码内容
 
 📱 **支持的马来西亚号码格式：**
 ```
@@ -448,18 +476,21 @@ def handle_start_command(chat_id, user_id):
 
 🚀 **特色功能：**
 • 🕐 显示每个号码的首次出现时间
-• 🔍 检测重复号码并显示关联信息
-• 📊 马来西亚运营商详细分析
-• 🗺️ 州属和地区识别
+• 🔍 检测重复号码并显示与谁重复
+• 🔒 保护隐私：不显示号码具体内容
 
 💡 直接发送马来西亚电话号码开始分析！
 输入 /help 查看更多命令。"""
 
     send_telegram_message(chat_id, welcome_text)
 
-def handle_phone_message(chat_id, user_id, message_text):
+def handle_phone_message(chat_id, user_id, message_text, user_info=None):
     """处理包含电话号码的消息"""
     try:
+        # 更新用户信息
+        if user_info:
+            phone_state.update_user_info(user_id, user_info)
+        
         # 提取马来西亚电话号码
         phone_numbers = clean_malaysia_phone_number(message_text)
         
@@ -495,7 +526,6 @@ def handle_phone_message(chat_id, user_id, message_text):
             # 记录到历史
             user_data = phone_state.get_user_stats(user_id)
             user_data['phone_history'].append({
-                'phone': analysis['formatted'],
                 'time': datetime.now().isoformat(),
                 'is_duplicate': duplicate_info['is_duplicate']
             })
@@ -504,18 +534,15 @@ def handle_phone_message(chat_id, user_id, message_text):
         phone_state.record_query(user_id, len(phone_numbers), list(carriers_found))
         user_data = phone_state.get_user_stats(user_id)
 
-        # 构建响应
+        # 构建响应（隐私版 - 不显示具体号码）
         if len(analyses) == 1:
-            # 单个号码详细分析
+            # 单个号码分析
             analysis = analyses[0]
             duplicate_info = analysis['duplicate_info']
             
-            response_text = f"""🇲🇾 **马来西亚电话号码分析报告**
+            response_text = f"""🇲🇾 **马来西亚电话号码检测报告**
 
-📱 **号码信息：**
-• 原始号码：`{analysis['original']}`
-• 标准格式：`{analysis['formatted']}`
-• 本地格式：`{analysis['local_format']}`
+📱 **基本信息：**
 • 号码类型：{analysis['number_type']}
 • 运营商：{analysis['carrier']}"""
 
@@ -524,13 +551,14 @@ def handle_phone_message(chat_id, user_id, message_text):
             
             response_text += f"\n• 有效性：{'✅ 有效' if analysis['is_valid'] else '❌ 格式异常'}"
 
-            # 重复检测信息
+            # 重复检测信息（重点功能）
             response_text += f"\n\n⏰ **时间追踪：**"
             if duplicate_info['is_duplicate']:
                 first_seen = duplicate_info['first_seen']
                 response_text += f"\n• ⚠️ **重复号码！**"
                 response_text += f"\n• 首次出现：{first_seen.strftime('%Y-%m-%d %H:%M:%S')}"
                 response_text += f"\n• 重复次数：{duplicate_info['occurrence_count']} 次"
+                response_text += f"\n• 首次发送者：{duplicate_info['first_user_name']}"
                 response_text += f"\n• 涉及用户：{duplicate_info['total_users']} 人"
                 
                 # 计算时间差
@@ -546,6 +574,7 @@ def handle_phone_message(chat_id, user_id, message_text):
             else:
                 response_text += f"\n• ✨ **首次出现！**"
                 response_text += f"\n• 记录时间：{duplicate_info['first_seen'].strftime('%Y-%m-%d %H:%M:%S')}"
+                response_text += f"\n• 首次发送者：{duplicate_info['first_user_name']}"
 
             response_text += f"\n\n📊 **您的统计：**"
             response_text += f"\n• 总查询：{user_data['query_count']:,} 次"
@@ -554,7 +583,7 @@ def handle_phone_message(chat_id, user_id, message_text):
 
         else:
             # 多个号码批量分析
-            response_text = f"""🇲🇾 **马来西亚号码批量分析**
+            response_text = f"""🇲🇾 **马来西亚号码批量检测**
 
 🔍 **共检测到 {len(analyses)} 个号码：**
 
@@ -566,161 +595,291 @@ def handle_phone_message(chat_id, user_id, message_text):
                 status = '✅' if analysis['is_valid'] else '❌'
                 dup_mark = '🔄' if duplicate_info['is_duplicate'] else '✨'
                 
-                response_text += f"""**{i}. {analysis['formatted']}** {status} {dup_mark}
-   {analysis['carrier']} | {analysis['number_type']}"""
+                response_text += f"**{i}. {analysis['number_type']}** {status} {dup_mark}\n"
+                response_text += f"   运营商：{analysis['carrier']}\n"
                 
                 if duplicate_info['is_duplicate']:
                     duplicates_found += 1
-                    response_text += f" | 重复{duplicate_info['occurrence_count']}次"
+                    response_text += f"   🔄 重复号码（第{duplicate_info['occurrence_count']}次）\n"
+                    response_text += f"   首次：{duplicate_info['first_seen'].strftime('%Y-%m-%d %H:%M:%S')} by {duplicate_info['first_user_name']}\n"
                 else:
-                    response_text += f" | 首次出现"
+                    response_text += f"   ✨ 首次出现：{duplicate_info['first_seen'].strftime('%Y-%m-%d %H:%M:%S')}\n"
                 
-                response_text += "\n\n"
+                response_text += "\n"
 
             response_text += f"""📊 **批量分析摘要：**
 • 有效号码：{sum(1 for a in analyses if a['is_valid'])}/{len(analyses)}
 • 重复号码：{duplicates_found} 个
-• 涉及运营商：{len(carriers_found)} 家
-• 您的总查询：{user_data['query_count']:,} 次
+• 新号码：{len(analyses) - duplicates_found} 个
 
-💡 发送单个号码可获取详细重复分析！"""
-
+📱 **您的统计：**
+• 总查询：{user_data['query_count']:,} 次
+• 今日查询：{user_data['queries_today']} 次"""
+        
         send_telegram_message(chat_id, response_text)
         
     except Exception as e:
         print(f"处理电话号码消息错误: {e}")
-        send_telegram_message(chat_id, "❌ 处理消息时出现错误，请稍后重试。")
+        send_telegram_message(chat_id, "❌ 处理错误，请重试。")
 
-def process_telegram_update(update):
-    """处理Telegram更新"""
-    try:
-        if 'message' not in update:
-            return
-            
-        message = update['message']
-        chat_id = message['chat']['id']
-        user_id = message['from']['id']
-        
-        # 处理命令
-        if 'text' in message:
-            text = message['text'].strip()
-            
-            if text.startswith('/start'):
-                handle_start_command(chat_id, user_id)
-            else:
-                # 处理普通消息（可能包含马来西亚电话号码）
-                handle_phone_message(chat_id, user_id, text)
-        
-    except Exception as e:
-        print(f"处理Telegram更新错误: {e}")
+def handle_help_command(chat_id, user_id):
+    """处理/help命令"""
+    phone_state.record_query(user_id)
+    
+    help_text = """🇲🇾 **马来西亚电话号码检测机器人 - 帮助**
+
+🔍 **主要功能：**
+• 检测马来西亚手机和固话号码
+• 记录首次出现时间
+• 检测重复号码及关联信息
+• 隐私保护：不显示具体号码内容
+
+📱 **支持格式：**
+• +60 11-6852 8782（国际格式）
+• 011-6852 8782（本地手机）
+• 03-1234 5678（固话）
+• 60116852782（纯数字）
+
+⚡ **快速命令：**
+• /start - 开始使用
+• /help - 显示帮助
+• /stats - 查看个人统计
+• /status - 系统状态
+
+💡 **使用方法：**
+直接发送包含马来西亚电话号码的消息即可自动检测和分析！
+
+🔒 **隐私保护：**
+本机器人不会显示具体的号码内容，只显示检测时间和重复关联信息。"""
+
+    send_telegram_message(chat_id, help_text)
+
+def handle_stats_command(chat_id, user_id):
+    """处理/stats命令"""
+    phone_state.record_query(user_id)
+    user_data = phone_state.get_user_stats(user_id)
+    
+    # 计算使用天数
+    first_seen = datetime.fromisoformat(user_data['first_seen'])
+    days_using = (datetime.now() - first_seen).days + 1
+    
+    # 获取最活跃的小时
+    hourly_stats = user_data['hourly_stats']
+    most_active_hour = max(hourly_stats.items(), key=lambda x: x[1]) if hourly_stats else (0, 0)
+    
+    # 获取最常见的运营商
+    carrier_stats = user_data['carrier_stats']
+    top_carrier = max(carrier_stats.items(), key=lambda x: x[1]) if carrier_stats else ('无', 0)
+    
+    stats_text = f"""📊 **您的使用统计**
+
+👤 **基本信息：**
+• 用户名：{user_data.get('username', '未知')}
+• 首次使用：{first_seen.strftime('%Y-%m-%d %H:%M:%S')}
+• 使用天数：{days_using} 天
+
+🔍 **查询统计：**
+• 总查询次数：{user_data['query_count']:,} 次
+• 今日查询：{user_data['queries_today']} 次
+• 发现号码：{user_data['phone_numbers_found']:,} 个
+• 平均每日：{user_data['query_count']/days_using:.1f} 次
+
+📱 **使用习惯：**
+• 最活跃时段：{most_active_hour[0]:02d}:00 ({most_active_hour[1]} 次)
+• 最常见运营商：{top_carrier[0]} ({top_carrier[1]} 次)
+
+📈 **最近记录：**"""
+    
+    # 显示最近几次查询
+    recent_history = list(user_data['phone_history'])[-5:]
+    if recent_history:
+        for i, record in enumerate(recent_history[-3:], 1):
+            record_time = datetime.fromisoformat(record['time'])
+            status = '🔄' if record['is_duplicate'] else '✨'
+            stats_text += f"\n• {record_time.strftime('%m-%d %H:%M')} {status}"
+    else:
+        stats_text += "\n• 暂无记录"
+    
+    send_telegram_message(chat_id, stats_text)
+
+def handle_status_command(chat_id, user_id):
+    """处理/status命令"""
+    phone_state.record_query(user_id)
+    
+    system_status = phone_state.get_system_status()
+    global_stats = phone_state.get_global_stats()
+    
+    # 系统运行时间
+    uptime = system_status['uptime']
+    
+    status_text = f"""🔧 **系统状态报告**
+
+⚙️ **系统信息：**
+• 运行时间：{uptime}
+• 心跳次数：{system_status['heartbeat_count']:,}
+• 处理消息：{system_status['message_count']:,} 条
+• 平台：Linux (云端)
+
+📊 **全局统计：**
+• 总用户：{global_stats['total_users']:,} 人
+• 总查询：{global_stats['total_queries']:,} 次
+• 注册号码：{global_stats['total_registered_phones']:,} 个
+• 重复检测：{global_stats['total_duplicates']:,} 次
+
+📱 **今日概况：**
+• 活跃用户：{system_status['active_users']} 人
+• 系统负载：正常 ✅
+• 响应状态：良好 🟢
+
+🔒 **隐私保护：**
+• 不存储具体号码内容
+• 只记录时间和关联信息
+• 定期清理历史数据
+
+💡 **版本信息：**
+• 机器人版本：v10.4 隐私版
+• 更新时间：2025年10月
+• 特色功能：号码隐私保护"""
+    
+    send_telegram_message(chat_id, status_text)
 
 class TelegramWebhookHandler(BaseHTTPRequestHandler):
-    """Telegram Webhook处理器"""
+    """处理Telegram Webhook请求"""
     
     def do_POST(self):
-        """处理POST请求"""
         try:
+            # 读取请求数据
             content_length = int(self.headers['Content-Length'])
             post_data = self.rfile.read(content_length)
             
             # 解析JSON数据
             update = json.loads(post_data.decode('utf-8'))
             
-            # 处理更新
-            process_telegram_update(update)
+            # 处理消息
+            if 'message' in update:
+                message = update['message']
+                chat_id = message['chat']['id']
+                user_id = message['from']['id']
+                
+                # 获取用户信息
+                user_info = message['from']
+                
+                # 处理文本消息
+                if 'text' in message:
+                    text = message['text'].strip()
+                    
+                    if text.startswith('/start'):
+                        handle_start_command(chat_id, user_id)
+                    elif text.startswith('/help'):
+                        handle_help_command(chat_id, user_id)
+                    elif text.startswith('/stats'):
+                        handle_stats_command(chat_id, user_id)
+                    elif text.startswith('/status'):
+                        handle_status_command(chat_id, user_id)
+                    else:
+                        # 检查是否包含电话号码
+                        handle_phone_message(chat_id, user_id, text, user_info)
             
-            # 响应成功
+            # 返回成功响应
             self.send_response(200)
-            self.send_header('Content-Type', 'application/json')
+            self.send_header('Content-type', 'application/json')
             self.end_headers()
-            self.wfile.write(json.dumps({'ok': True}).encode('utf-8'))
+            self.wfile.write(b'{"ok": true}')
             
         except Exception as e:
-            print(f"处理POST请求错误: {e}")
+            print(f"Webhook处理错误: {e}")
+            # 返回错误响应
             self.send_response(500)
             self.end_headers()
     
     def do_GET(self):
-        """处理GET请求（健康检查）"""
+        """处理健康检查请求"""
         try:
-            if self.path == '/health':
-                # 健康检查
-                system_status = phone_state.get_system_status()
-                health_data = {
-                    'status': 'healthy',
-                    'uptime': system_status['uptime'],
-                    'message_count': system_status['message_count'],
-                    'registered_phones': system_status['registered_phones'],
-                    'timestamp': datetime.now().isoformat()
-                }
-                
-                self.send_response(200)
-                self.send_header('Content-Type', 'application/json')
-                self.end_headers()
-                self.wfile.write(json.dumps(health_data).encode('utf-8'))
-                
-            else:
-                # 默认响应
-                self.send_response(200)
-                self.send_header('Content-Type', 'text/html; charset=utf-8')
-                self.end_headers()
-                
-                html_response = """
-<!DOCTYPE html>
-<html>
-<head>
-    <meta charset="UTF-8">
-    <title>马来西亚电话号码检测机器人（修复版）</title>
-</head>
-<body>
-    <h1>🇲🇾 马来西亚电话号码专用检测机器人</h1>
-    <p>✅ 服务正在运行（修复版）</p>
-    <p>🚀 零依赖架构，专注马来西亚号码</p>
-    <p>⏰ 支持重复检测和时间追踪</p>
-    <p>📡 详细运营商识别</p>
-    <p>🔧 修复了号码识别问题</p>
-    <hr>
-    <p>在Telegram中搜索机器人并开始使用！</p>
-    <p>测试号码：+60 11-6852 8782</p>
-</body>
-</html>
-                """
-                self.wfile.write(html_response.encode('utf-8'))
-                
+            system_status = phone_state.get_system_status()
+            
+            response_data = {
+                'status': 'healthy',
+                'uptime': system_status['uptime'],
+                'message_count': system_status['message_count'],
+                'version': 'v10.4-privacy'
+            }
+            
+            self.send_response(200)
+            self.send_header('Content-type', 'application/json')
+            self.end_headers()
+            self.wfile.write(json.dumps(response_data, ensure_ascii=False).encode('utf-8'))
+            
         except Exception as e:
-            print(f"处理GET请求错误: {e}")
+            print(f"健康检查错误: {e}")
             self.send_response(500)
             self.end_headers()
     
     def log_message(self, format, *args):
-        """覆盖日志方法以减少输出"""
+        """禁用默认日志"""
         pass
 
-def main():
-    """主函数"""
+def setup_webhook():
+    """设置Webhook"""
     try:
-        # 获取端口
-        port = int(os.environ.get('PORT', 8000))
+        # 获取Render提供的URL
+        render_url = os.environ.get('RENDER_EXTERNAL_URL')
+        if not render_url:
+            print("❌ 未找到RENDER_EXTERNAL_URL环境变量")
+            return False
         
-        print(f"🇲🇾 启动马来西亚电话号码专用检测机器人（修复版）")
-        print(f"📡 服务端口: {port}")
-        print(f"⏰ 重复检测: 已启用")
-        print(f"🔧 架构: 零依赖")
-        print(f"✅ 修复: 号码识别问题已解决")
+        webhook_url = f"{render_url}/webhook"
+        
+        # 设置webhook
+        data = urllib.parse.urlencode({'url': webhook_url}).encode('utf-8')
+        req = urllib.request.Request(
+            f'{TELEGRAM_API}/setWebhook',
+            data=data,
+            headers={'Content-Type': 'application/x-www-form-urlencoded'}
+        )
+        
+        with urllib.request.urlopen(req, timeout=10) as response:
+            result = json.loads(response.read().decode('utf-8'))
+            if result.get('ok'):
+                print(f"✅ Webhook设置成功: {webhook_url}")
+                return True
+            else:
+                print(f"❌ Webhook设置失败: {result}")
+                return False
+                
+    except Exception as e:
+        print(f"❌ 设置Webhook错误: {e}")
+        return False
+
+def main():
+    """主程序"""
+    print("🚀 启动马来西亚电话号码检测机器人（隐私版）...")
+    
+    # 获取端口
+    port = int(os.environ.get('PORT', 8000))
+    
+    try:
+        # 设置Webhook
+        if setup_webhook():
+            print("✅ Webhook配置完成")
+        else:
+            print("⚠️  Webhook配置失败，但继续运行")
         
         # 启动HTTP服务器
         server = HTTPServer(('0.0.0.0', port), TelegramWebhookHandler)
-        print(f"✅ 马来西亚号码检测服务器启动成功，监听端口 {port}")
+        print(f"🌐 HTTP服务器启动在端口 {port}")
+        print(f"🔧 平台: {platform.platform()}")
+        print(f"🐍 Python: {platform.python_version()}")
+        print("✅ 系统就绪，等待消息...")
         
-        # 启动服务
+        # 运行服务器
         server.serve_forever()
         
     except KeyboardInterrupt:
-        print("\n🛑 收到停止信号，正在关闭服务器...")
+        print("\n⏹️  收到停止信号")
     except Exception as e:
-        print(f"❌ 服务器启动失败: {e}")
+        print(f"❌ 程序错误: {e}")
     finally:
-        print("👋 服务器已关闭")
+        print("🔄 程序结束")
 
 if __name__ == '__main__':
     main()
