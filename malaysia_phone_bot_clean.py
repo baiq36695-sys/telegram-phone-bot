@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-管号机器人 v11.0 - 最终版
+管号机器人 v11.1 - 超简洁版
 完全按照用户界面需求设计的马来西亚电话号码检测机器人
+移除冗余信息，只显示核心内容
 使用Python内置库实现
 """
 
@@ -85,7 +86,7 @@ class PhoneNumberState:
         # 启动心跳线程
         self.heartbeat_thread = threading.Thread(target=self._heartbeat_worker, daemon=True)
         self.heartbeat_thread.start()
-        print("✅ 管号机器人系统启动")
+        print("✅ 管号机器人系统启动（超简洁版）")
 
     def _heartbeat_worker(self):
         """心跳监控线程"""
@@ -102,13 +103,13 @@ class PhoneNumberState:
     def update_user_info(self, user_id, user_info):
         """更新用户信息"""
         with self._lock:
-            # 提取用户名或姓名
+            # 提取用户名或姓名（不加@符号）
             username = user_info.get('username')
             first_name = user_info.get('first_name', '')
             last_name = user_info.get('last_name', '')
             
             if username:
-                display_name = username
+                display_name = username  # 直接使用用户名，不加@
             else:
                 display_name = f"{first_name} {last_name}".strip() or f"用户{user_id}"
             
@@ -337,7 +338,7 @@ def analyze_malaysia_phone(phone_number):
         # 判断号码类型
         if local_number.startswith('1'):
             # 手机号码
-            analysis['number_type'] = '🇲🇾 马来西亚手机'
+            analysis['number_type'] = '🇺🇸 马来西亚手机'
             
             # 识别运营商（基于前两位或三位）
             if len(local_number) >= 2:
@@ -375,7 +376,7 @@ def analyze_malaysia_phone(phone_number):
             
         elif local_number[0] in '23456789':
             # 固定电话
-            analysis['number_type'] = '🇲🇾 马来西亚固话'
+            analysis['number_type'] = '🇺🇸 马来西亚固话'
             
             # 识别地区
             if len(local_number) >= 2:
@@ -398,7 +399,7 @@ def analyze_malaysia_phone(phone_number):
         
         # 如果仍然未知，但长度合理，标记为可能有效
         if analysis['number_type'] == '未知' and 8 <= len(local_number) <= 11:
-            analysis['number_type'] = '🇲🇾 可能的马来西亚号码'
+            analysis['number_type'] = '🇺🇸 可能的马来西亚号码'
             analysis['is_valid'] = True
             analysis['carrier'] = '未知运营商'
     
@@ -453,15 +454,15 @@ def handle_start_command(chat_id, user_id):
     """处理/start命令"""
     phone_state.record_query(user_id)
     
-    welcome_text = f"""📱 **管号机器人**
+    welcome_text = f"""🗣️ **欢迎使用管号机器人!**
 
-🔍 **专业功能：**
+🔍 **专业功能:**
 • 📱 马来西亚手机和固话识别
 • ⏰ 首次出现时间记录
 • 🔄 重复号码检测及关联信息
 • 👥 用户追踪和统计
 
-📱 **支持的马来西亚号码格式：**
+📱 **支持的马来西亚号码格式:**
 ```
 +60 11-6852 8782  (国际格式)
 011-6852 8782     (本地手机)
@@ -469,8 +470,8 @@ def handle_start_command(chat_id, user_id):
 60116852782      (纯数字)
 ```
 
-🚀 **使用方法：**
-直接发送马来西亚电话号码开始检测！
+🚀 **使用方法:**
+直接发送马来西亚电话号码开始检测!
 
 💡 输入 /help 查看更多命令。"""
 
@@ -489,13 +490,13 @@ def handle_phone_message(chat_id, user_id, message_text, user_info=None):
         if not phone_numbers:
             response_text = """❌ **没有检测到有效的马来西亚电话号码**
 
-💡 **支持的格式示例：**
+💡 **支持的格式示例:**
 • +60 11-6852 8782
 • 011-6852 8782  
 • 03-1234 5678
 • 60116852782
 
-请发送马来西亚电话号码！"""
+请发送马来西亚电话号码!"""
             send_telegram_message(chat_id, response_text)
             return
         
@@ -518,44 +519,36 @@ def handle_phone_message(chat_id, user_id, message_text, user_info=None):
         # 记录统计
         phone_state.record_query(user_id, len(phone_numbers), list(carriers_found))
 
-        # 构建响应（按照用户界面需求）
+        # 构建响应（超简洁版 - 移除冗余信息）
         if len(analyses) == 1:
-            # 单个号码分析 - 按照用户指定的格式
+            # 单个号码分析 - 超简洁直观格式
             analysis = analyses[0]
             duplicate_info = analysis['duplicate_info']
             current_time = datetime.now()
             
-            response_text = f"""📱 **管号机器人**
+            response_text = f"""🗣️ **当前号码:** `{duplicate_info['formatted_phone']}`
+🔍 **号码类型:** {analysis['number_type']}
 
-🗣️ **当前号码：** `{duplicate_info['formatted_phone']}`
+👤 **当前用户:** {duplicate_info['current_user_name']}
+⏰ **当前时间:** {current_time.strftime('%Y-%m-%d %H:%M:%S')}
 
-🚁 **重复马号检测** 🚁
+📊 **原始记录:**
+👤 **首次用户:** {duplicate_info['first_user_name']}
+⏰ **首次时间:** {duplicate_info['first_seen'].strftime('%Y-%m-%d %H:%M:%S')}
 
-📱 **当前号码：** `{duplicate_info['formatted_phone']}`
-🔍 **号码类型：** {analysis['number_type']}
+🎯 **统计信息:**
+📈 **历史交叉数:** {duplicate_info['occurrence_count']}次
+👥 **涉及用户:** {duplicate_info['total_users']}人"""
 
-👤 **当前用户：** {duplicate_info['current_user_name']}
-⏰ **当前时间：** {current_time.strftime('%Y-%m-%d %H:%M:%S')}
-
-📊 **原始记录：**
-👤 **首次用户：** {duplicate_info['first_user_name']}
-⏰ **首次时间：** {duplicate_info['first_seen'].strftime('%Y-%m-%d %H:%M:%S')}
-
-🎯 **统计信息：**
-📈 **历史交叉数：** {duplicate_info['occurrence_count']}次
-👥 **涉及用户：** {duplicate_info['total_users']}人"""
-
-            # 根据是否重复显示警告
+            # 根据是否重复显示警告 - 简洁明了
             if duplicate_info['is_duplicate']:
-                response_text += f"\n\n⚠️ **请注意：此号码已被使用！**"
+                response_text += f"\n\n⚠️ **请注意: 此号码已被使用!**"
             else:
-                response_text += f"\n\n✅ **新号码：首次记录！**"
+                response_text += f"\n\n✅ **新号码: 首次记录!**"
 
         else:
-            # 多个号码批量分析
-            response_text = f"""📱 **管号机器人**
-
-🔍 **批量检测结果：共{len(analyses)}个号码**
+            # 多个号码批量分析 - 超简洁格式
+            response_text = f"""🔍 **批量检测: 共{len(analyses)}个号码**
 
 """
             
@@ -563,24 +556,25 @@ def handle_phone_message(chat_id, user_id, message_text, user_info=None):
                 duplicate_info = analysis['duplicate_info']
                 current_time = datetime.now()
                 
-                response_text += f"""**═══ 号码 {i} ═══**
-📱 **当前号码：** `{duplicate_info['formatted_phone']}`
-🔍 **号码类型：** {analysis['number_type']}
-👤 **当前用户：** {duplicate_info['current_user_name']}
-⏰ **当前时间：** {current_time.strftime('%Y-%m-%d %H:%M:%S')}
+                response_text += f"""**───── 号码 {i} ─────**
+🗣️ **当前号码:** `{duplicate_info['formatted_phone']}`
+🔍 **号码类型:** {analysis['number_type']}
 
-📊 **原始记录：**
-👤 **首次用户：** {duplicate_info['first_user_name']}
-⏰ **首次时间：** {duplicate_info['first_seen'].strftime('%Y-%m-%d %H:%M:%S')}
+👤 **当前用户:** {duplicate_info['current_user_name']}
+⏰ **当前时间:** {current_time.strftime('%Y-%m-%d %H:%M:%S')}
 
-🎯 **统计信息：**
-📈 **历史交叉数：** {duplicate_info['occurrence_count']}次
-👥 **涉及用户：** {duplicate_info['total_users']}人"""
+📊 **原始记录:**
+👤 **首次用户:** {duplicate_info['first_user_name']}
+⏰ **首次时间:** {duplicate_info['first_seen'].strftime('%Y-%m-%d %H:%M:%S')}
+
+🎯 **统计信息:**
+📈 **历史交叉数:** {duplicate_info['occurrence_count']}次
+👥 **涉及用户:** {duplicate_info['total_users']}人"""
 
                 if duplicate_info['is_duplicate']:
-                    response_text += f"\n⚠️ **请注意：此号码已被使用！**\n\n"
+                    response_text += f"\n⚠️ **请注意: 此号码已被使用!**\n\n"
                 else:
-                    response_text += f"\n✅ **新号码：首次记录！**\n\n"
+                    response_text += f"\n✅ **新号码: 首次记录!**\n\n"
         
         send_telegram_message(chat_id, response_text)
         
@@ -592,28 +586,28 @@ def handle_help_command(chat_id, user_id):
     """处理/help命令"""
     phone_state.record_query(user_id)
     
-    help_text = """📱 **管号机器人 - 帮助**
+    help_text = """🗣️ **管号机器人 - 帮助**
 
-🔍 **主要功能：**
+🔍 **主要功能:**
 • 检测马来西亚手机和固话号码
 • 记录首次出现时间
 • 检测重复号码及关联信息
 • 用户追踪和统计
 
-📱 **支持格式：**
+📱 **支持格式:**
 • +60 11-6852 8782（国际格式）
 • 011-6852 8782（本地手机）
 • 03-1234 5678（固话）
 • 60116852782（纯数字）
 
-⚡ **快速命令：**
+⚡ **快速命令:**
 • /start - 开始使用
 • /help - 显示帮助
 • /stats - 查看个人统计
 • /status - 系统状态
 
-💡 **使用方法：**
-直接发送包含马来西亚电话号码的消息即可自动检测和分析！"""
+💡 **使用方法:**
+直接发送包含马来西亚电话号码的消息即可自动检测和分析!"""
 
     send_telegram_message(chat_id, help_text)
 
@@ -628,16 +622,16 @@ def handle_stats_command(chat_id, user_id):
     
     stats_text = f"""📊 **您的使用统计**
 
-👤 **用户信息：**
-• 用户名：{user_data.get('username', '未知')}
-• 首次使用：{first_seen.strftime('%Y-%m-%d %H:%M:%S')}
-• 使用天数：{days_using} 天
+👤 **用户信息:**
+• 用户名: {user_data.get('username', '未知')}
+• 首次使用: {first_seen.strftime('%Y-%m-%d %H:%M:%S')}
+• 使用天数: {days_using} 天
 
-🔍 **查询统计：**
-• 总查询次数：{user_data['query_count']:,} 次
-• 今日查询：{user_data['queries_today']} 次
-• 发现号码：{user_data['phone_numbers_found']:,} 个
-• 平均每日：{user_data['query_count']/days_using:.1f} 次"""
+🔍 **查询统计:**
+• 总查询次数: {user_data['query_count']:,} 次
+• 今日查询: {user_data['queries_today']} 次
+• 发现号码: {user_data['phone_numbers_found']:,} 个
+• 平均每日: {user_data['query_count']/days_using:.1f} 次"""
     
     send_telegram_message(chat_id, stats_text)
 
@@ -650,21 +644,21 @@ def handle_status_command(chat_id, user_id):
     
     status_text = f"""🔧 **系统状态报告**
 
-⚙️ **系统信息：**
-• 运行时间：{system_status['uptime']}
-• 处理消息：{system_status['message_count']:,} 条
-• 平台：Linux (云端)
+⚙️ **系统信息:**
+• 运行时间: {system_status['uptime']}
+• 处理消息: {system_status['message_count']:,} 条
+• 平台: Linux (云端)
 
-📊 **全局统计：**
-• 总用户：{global_stats['total_users']:,} 人
-• 总查询：{global_stats['total_queries']:,} 次
-• 注册号码：{global_stats['total_registered_phones']:,} 个
-• 重复检测：{global_stats['total_duplicates']:,} 次
+📊 **全局统计:**
+• 总用户: {global_stats['total_users']:,} 人
+• 总查询: {global_stats['total_queries']:,} 次
+• 注册号码: {global_stats['total_registered_phones']:,} 个
+• 重复检测: {global_stats['total_duplicates']:,} 次
 
-💡 **版本信息：**
-• 机器人版本：v11.0 管号机器人
-• 更新时间：2025年10月
-• 特色功能：界面优化版"""
+💡 **版本信息:**
+• 机器人版本: v11.1 超简洁版
+• 更新时间: 2025年10月
+• 特色功能: 移除冗余信息"""
     
     send_telegram_message(chat_id, status_text)
 
@@ -726,7 +720,7 @@ class TelegramWebhookHandler(BaseHTTPRequestHandler):
                 'status': 'healthy',
                 'uptime': system_status['uptime'],
                 'message_count': system_status['message_count'],
-                'version': 'v11.0-管号机器人'
+                'version': 'v11.1-超简洁版'
             }
             
             self.send_response(200)
@@ -777,7 +771,7 @@ def setup_webhook():
 
 def main():
     """主程序"""
-    print("🚀 启动管号机器人...")
+    print("🚀 启动管号机器人（超简洁版）...")
     
     # 获取端口
     port = int(os.environ.get('PORT', 8000))
