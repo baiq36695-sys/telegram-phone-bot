@@ -22,8 +22,9 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 BOT_TOKEN = '8424823618:AAFwjIYQH86nKXOiJUybfBRio7sRJl-GUEU'
 TELEGRAM_API = f'https://api.telegram.org/bot{BOT_TOKEN}'
 
-# 马来西亚州属区号
+# 马来西亚州属区号和归属地
 MALAYSIA_AREA_CODES = {
+    # 固话区号
     '03': '雪兰莪/吉隆坡/布城',
     '04': '吉打/槟城',
     '05': '霹雳',
@@ -39,6 +40,31 @@ MALAYSIA_AREA_CODES = {
     '087': '沙巴亚庇',
     '088': '沙巴斗湖',
     '089': '沙巴根地咬'
+}
+
+# 马来西亚手机号码归属地（基于前缀）
+MALAYSIA_MOBILE_CARRIERS = {
+    '010': '天地通信(DiGi)',
+    '011': '天地通信(DiGi)',
+    '012': '明讯(Maxis)',
+    '013': '天地通信(DiGi)',
+    '014': '天地通信(DiGi)',
+    '016': '天地通信(DiGi)',
+    '017': '马来西亚电信(Maxis)',
+    '018': 'U Mobile',
+    '019': '天地通信(DiGi)',
+    '010': '明讯(Maxis)',
+    '015': '天地通信(DiGi)',
+    '020': '电讯盈科(PCCW-HKT)',
+}
+
+# 手机号码运营商归属地
+MOBILE_CARRIER_REGIONS = {
+    '天地通信(DiGi)': '全马来西亚',
+    '明讯(Maxis)': '全马来西亚', 
+    'U Mobile': '全马来西亚',
+    '马来西亚电信(Maxis)': '全马来西亚',
+    '电讯盈科(PCCW-HKT)': '全马来西亚'
 }
 
 class PhoneNumberState:
@@ -341,7 +367,7 @@ def clean_malaysia_phone_number(text):
     return list(set(cleaned_numbers))  # 去重
 
 def analyze_malaysia_phone(phone_number):
-    """分析马来西亚电话号码（改进版：号码地区）"""
+    """分析马来西亚电话号码（归属地版）"""
     analysis = {
         'original': phone_number,
         'normalized': '',
@@ -349,6 +375,7 @@ def analyze_malaysia_phone(phone_number):
         'number_type': '未知',
         'carrier': '未知',
         'region': '未知',
+        'location': '未知归属地',
         'flag': '🇲🇾',
         'description': '马来西亚号码'
     }
@@ -374,32 +401,54 @@ def analyze_malaysia_phone(phone_number):
         # 提取本地号码部分
         local_number = normalized[2:]  # 去掉60
         
-        if len(local_number) >= 2:
-            area_code = local_number[:2]
-            if len(local_number) >= 3 and area_code in ['08']:
-                area_code = local_number[:3]  # 沙捞越的3位区号
-            
-            # 检查区号
-            if area_code in MALAYSIA_AREA_CODES:
-                analysis['region'] = MALAYSIA_AREA_CODES[area_code]
-                analysis['number_type'] = f'🇲🇾 {analysis["region"]}'
-                analysis['is_valid'] = True
-            
-            # 判断手机还是固话
+        if len(local_number) >= 3:
+            # 检查手机号码（以1开头）
             if local_number.startswith('1'):
-                analysis['carrier'] = '手机号码'
-                if not analysis['is_valid']:
-                    analysis['number_type'] = '🇲🇾 马来西亚手机'
+                # 手机号码归属地分析
+                mobile_prefix = local_number[:3]  # 取前3位
+                
+                if mobile_prefix in MALAYSIA_MOBILE_CARRIERS:
+                    carrier_name = MALAYSIA_MOBILE_CARRIERS[mobile_prefix]
+                    analysis['carrier'] = carrier_name
+                    analysis['region'] = MOBILE_CARRIER_REGIONS.get(carrier_name, '全马来西亚')
+                    analysis['location'] = f'{carrier_name}·{analysis["region"]}'
+                    analysis['number_type'] = f'📱 {analysis["location"]}'
                     analysis['is_valid'] = True
-            elif local_number[0] in '23456789':
-                analysis['carrier'] = '固定电话'
-                if not analysis['is_valid']:
-                    analysis['number_type'] = '🇲🇾 马来西亚固话'
+                else:
+                    # 未知手机运营商，但仍是手机号
+                    analysis['carrier'] = '马来西亚手机'
+                    analysis['region'] = '全马来西亚'
+                    analysis['location'] = '马来西亚手机网络'
+                    analysis['number_type'] = f'📱 {analysis["location"]}'
+                    analysis['is_valid'] = True
+            
+            else:
+                # 固话号码归属地分析
+                area_code = local_number[:2]
+                
+                # 检查3位区号（沙捞越地区）
+                if area_code == '08' and len(local_number) >= 3:
+                    area_code = local_number[:3]
+                
+                if area_code in MALAYSIA_AREA_CODES:
+                    region_name = MALAYSIA_AREA_CODES[area_code]
+                    analysis['carrier'] = '固定电话'
+                    analysis['region'] = region_name
+                    analysis['location'] = f'固话·{region_name}'
+                    analysis['number_type'] = f'🏠 {analysis["location"]}'
+                    analysis['is_valid'] = True
+                else:
+                    # 未知固话区号
+                    analysis['carrier'] = '固定电话'
+                    analysis['region'] = '马来西亚'
+                    analysis['location'] = '马来西亚固话'
+                    analysis['number_type'] = f'🏠 {analysis["location"]}'
                     analysis['is_valid'] = True
         
         # 如果仍然未知，但长度合理，标记为可能有效
         if analysis['number_type'] == '未知' and 8 <= len(local_number) <= 11:
-            analysis['number_type'] = '🇲🇾 可能的马来西亚号码'
+            analysis['number_type'] = '🇲🇾 马来西亚号码'
+            analysis['location'] = '马来西亚'
             analysis['is_valid'] = True
             analysis['carrier'] = '未知运营商'
     
@@ -527,7 +576,7 @@ def handle_phone_message(chat_id, user_id, message_text, user_info=None):
             current_time = datetime.now()
             
             response_text = f"""🗣️ 当前号码: {duplicate_info['formatted_phone']}
-📍 号码地区: {analysis['number_type']}
+📍 号码归属: {analysis['number_type']}
 
 👤 当前用户: {duplicate_info['current_user_name']}
 ⏰ 当前时间: {current_time.strftime('%Y-%m-%d %H:%M:%S')}
@@ -558,7 +607,7 @@ def handle_phone_message(chat_id, user_id, message_text, user_info=None):
                 
                 response_text += f"""───── 号码 {i} ─────
 🗣️ 当前号码: {duplicate_info['formatted_phone']}
-📍 号码地区: {analysis['number_type']}
+📍 号码归属: {analysis['number_type']}
 
 👤 当前用户: {duplicate_info['current_user_name']}
 ⏰ 当前时间: {current_time.strftime('%Y-%m-%d %H:%M:%S')}
