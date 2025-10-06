@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-马来西亚电话号码机器人 - 零依赖版本
-专为Render等云平台设计，无需任何第三方库
+马来西亚电话号码机器人 - 最终修复版本
+专为Render等云平台设计，零依赖，智能号码提取
 包含完整功能和性能优化
-
+ 
 作者: MiniMax Agent
-版本: 1.2.0 Zero Dependency
+版本: 1.3.0 Final Fixed
 更新时间: 2025-10-06
 """
 
@@ -61,6 +61,18 @@ PHONE_PATTERNS = {
     'toll_free': re.compile(r'^(1800)\d{6}$'),
     'premium': re.compile(r'^(600)\d{7}$')
 }
+
+# 智能提取电话号码的正则表达式
+PHONE_EXTRACTION_PATTERNS = [
+    # 国际格式：+60 xx-xxxx xxxx 或 +60 xxxxxxxxx
+    re.compile(r'(\+?60\s?[\d\s\-\(\)]{8,12})'),
+    # 本地格式：0xx-xxxxxxx 或 0xxxxxxxxx
+    re.compile(r'(0[\d\s\-\(\)]{8,11})'),
+    # 纯数字格式：10-11位数字
+    re.compile(r'(\d{10,11})'),
+    # 带括号格式：(0xx) xxx-xxxx
+    re.compile(r'\(?(0\d{2,3})\)?[\s\-]?(\d{3,4})[\s\-]?(\d{3,4})')
+]
 
 STATE_MAPPING = {
     '03': '吉隆坡/雪兰莪',
@@ -165,6 +177,32 @@ def data_cleanup_worker():
         except Exception as e:
             print(f"数据清理错误: {e}")
 
+def extract_phone_numbers(text):
+    """从文本中智能提取电话号码"""
+    phone_candidates = []
+    
+    # 使用多个正则表达式模式提取可能的电话号码
+    for pattern in PHONE_EXTRACTION_PATTERNS:
+        matches = pattern.findall(text)
+        for match in matches:
+            if isinstance(match, tuple):
+                # 处理带括号的格式
+                phone_candidates.append(''.join(match))
+            else:
+                phone_candidates.append(match)
+    
+    # 清理和验证提取的号码
+    valid_phones = []
+    for candidate in phone_candidates:
+        # 清理号码格式
+        cleaned = re.sub(r'[\s\-\(\)]+', '', candidate)
+        
+        # 基本长度验证
+        if len(cleaned) >= 9:
+            valid_phones.append(candidate)
+    
+    return valid_phones
+
 @lru_cache(maxsize=1000)
 def analyze_phone_number(phone):
     """分析电话号码（带缓存优化，支持多种格式）"""
@@ -250,44 +288,37 @@ def register_phone_number(phone, user_id, username):
             'timestamp': current_time
         }
         
-        # 更新用户数据
-        if user_id not in user_data:
-            user_data[user_id] = {}
-        
-        user_data[user_id].update({
-            'username': username,
-            'last_activity': current_time,
-            'registered_phones': user_data[user_id].get('registered_phones', 0) + 1
-        })
-        
-        return f"✅ 号码注册成功！"
+        return f"✅ 号码注册成功"
 
-def send_telegram_message(chat_id, text, parse_mode='HTML'):
-    """发送Telegram消息"""
-    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
-    
-    # 分割长消息
-    if len(text) > PRODUCTION_CONFIG['MAX_MESSAGE_LENGTH']:
-        parts = [text[i:i+PRODUCTION_CONFIG['MAX_MESSAGE_LENGTH']] 
-                for i in range(0, len(text), PRODUCTION_CONFIG['MAX_MESSAGE_LENGTH'])]
-        for part in parts:
-            send_telegram_message(chat_id, part, parse_mode)
-        return
-    
-    data = {
-        'chat_id': chat_id,
-        'text': text,
-        'parse_mode': parse_mode
-    }
-    
+def send_telegram_message(chat_id, text):
+    """发送Telegram消息（无需第三方库）"""
     try:
-        req_data = urllib.parse.urlencode(data).encode()
-        request = urllib.request.Request(url, data=req_data, method='POST')
-        with urllib.request.urlopen(request, timeout=PRODUCTION_CONFIG['REQUEST_TIMEOUT']) as response:
-            return response.read().decode()
+        # 限制消息长度
+        if len(text) > PRODUCTION_CONFIG['MAX_MESSAGE_LENGTH']:
+            text = text[:PRODUCTION_CONFIG['MAX_MESSAGE_LENGTH']-100] + "\n\n... (消息过长已截断)"
+        
+        url = f'https://api.telegram.org/bot{BOT_TOKEN}/sendMessage'
+        data = {
+            'chat_id': chat_id,
+            'text': text,
+            'parse_mode': 'HTML'
+        }
+        
+        # 编码数据
+        data_encoded = urllib.parse.urlencode(data).encode('utf-8')
+        
+        # 创建请求
+        req = urllib.request.Request(url, data=data_encoded, method='POST')
+        req.add_header('Content-Type', 'application/x-www-form-urlencoded')
+        
+        # 发送请求
+        with urllib.request.urlopen(req, timeout=PRODUCTION_CONFIG['REQUEST_TIMEOUT']) as response:
+            result = json.loads(response.read().decode())
+            return result.get('ok', False)
+            
     except Exception as e:
-        print(f"发送消息失败: {e}")
-        return None
+        print(f"发送消息错误: {e}")
+        return False
 
 def handle_message(message):
     """处理Telegram消息"""
@@ -315,18 +346,18 @@ def handle_message(message):
 • 号码注册和管理
 
 💡 <b>使用方法：</b>
-直接发送号码，支持多种格式：
+直接发送包含号码的消息，支持多种格式：
 <code>012-3456789</code>
 <code>+60 11-6852 8782</code>
-<code>03-12345678</code>
-<code>60123456789</code>
+<code>发送到 +60 13-970 3152</code>
+<code>联系电话：60123456789</code>
 
 🔧 <b>管理命令：</b>
 /status - 查看系统状态
 /clear - 清除个人数据
 /help - 查看帮助
 
-<i>零依赖版本，部署更稳定 🚀</i>
+<i>智能提取版本，识别更准确 🎯</i>
 """
             send_telegram_message(chat_id, response)
             
@@ -341,6 +372,12 @@ def handle_message(message):
 • <code>60123456789</code> (无+号国际)
 • <code>0123456789</code> (纯数字)
 
+<b>🤖 智能提取功能：</b>
+• <code>发送到 +60 13-970 3152</code>
+• <code>联系电话：012-3456789</code>
+• <code>10.24/送达 +60 13-970 3152</code>
+• <code>请拨打 0123456789</code>
+
 <b>📋 支持的号码类型：</b>
 • 手机号码：010,011,012,013,014,015,016,017,018,019
 • 固定电话：03,04,05,06,07,09,088,089,082-087
@@ -348,34 +385,22 @@ def handle_message(message):
 • 增值服务：600
 
 <b>📱 运营商识别：</b>
-• Maxis: 012,014,017,019
-• DiGi: 010,011,016
-• Celcom: 013,019
-• U Mobile: 015,018
-
-<b>⚙️ 自动功能：</b>
-• 格式标准化处理
-• 运营商自动识别
-• 地区自动识别
-• 重复号码检测
-
-需要帮助请联系管理员 👨‍💻
+• Maxis: 012, 014, 017, 019
+• Celcom: 013, 019
+• DiGi: 010, 011, 016
+• U Mobile: 015, 018
 """
             send_telegram_message(chat_id, response)
             
         elif text.startswith('/status'):
-            with data_lock:
-                total_phones = len(phone_registry)
-                total_users = len(user_data)
-                memory_mb = get_memory_usage_estimate()
-                
+            memory_mb = get_memory_usage_estimate()
             response = f"""
 📊 <b>系统状态报告</b>
 
-💾 <b>数据统计：</b>
-• 注册号码：{total_phones:,} 个
-• 活跃用户：{total_users:,} 人
-• 内存估算：{memory_mb:.1f} MB
+📈 <b>数据统计：</b>
+• 注册号码：{len(phone_registry)} 个
+• 活跃用户：{len(user_data)} 个
+• 内存使用：{memory_mb:.1f} MB
 
 ⚡ <b>性能指标：</b>
 • 缓存命中率：高效运行
@@ -384,9 +409,9 @@ def handle_message(message):
 
 🚀 <b>运行状态：</b>
 • 服务状态：正常运行
-• 版本信息：Zero Dependency 1.2.0
+• 版本信息：Final Fixed 1.3.0
 • 更新时间：2025-10-06
-• 识别引擎：已修复多格式支持
+• 识别引擎：智能提取已启用
 • 依赖状态：零第三方依赖
 
 <i>系统运行稳定，号码识别正常 ✅</i>
@@ -409,11 +434,34 @@ def handle_message(message):
             send_telegram_message(chat_id, response)
             
         else:
-            # 处理电话号码查询
-            result = analyze_phone_number(text)
-            if result and result['valid']:
-                # 构建详细信息
-                info = f"""
+            # 智能提取电话号码
+            extracted_phones = extract_phone_numbers(text)
+            
+            if not extracted_phones:
+                response = f"""
+❌ <b>未检测到电话号码</b>
+
+您输入的内容：<code>{text}</code>
+
+💡 <b>提示：</b>请发送包含马来西亚电话号码的消息
+
+📝 <b>支持格式示例：</b>
+• <code>012-3456789</code>
+• <code>+60 11-6852 8782</code>
+• <code>发送到 +60 13-970 3152</code>
+• <code>联系电话：0123456789</code>
+
+发送 /help 查看完整格式说明 📖
+"""
+                send_telegram_message(chat_id, response)
+                return
+            
+            # 分析第一个提取到的电话号码
+            for phone_candidate in extracted_phones:
+                result = analyze_phone_number(phone_candidate)
+                if result and result['valid']:
+                    # 构建详细信息
+                    info = f"""
 📱 <b>号码分析结果</b>
 
 🔢 <b>号码信息：</b>
@@ -422,45 +470,47 @@ def handle_message(message):
 • 号码类型：{result['type']}
 
 """
-                if result['operator'] != '未知':
-                    info += f"• 运营商：{result['operator']}\n"
-                if result['state'] != '未知':
-                    info += f"• 归属地：{result['state']}\n"
-                
-                # 检查是否已注册
-                with data_lock:
-                    if result['formatted'] in phone_registry:
-                        reg_info = phone_registry[result['formatted']]
-                        info += f"\n⚠️ <b>注册状态：</b>\n• 已被 @{reg_info['username']} 注册\n• 注册时间：{reg_info['timestamp'][:19]}\n"
-                    else:
-                        info += f"\n✅ <b>注册状态：</b> 可注册\n"
-                        # 自动注册号码
-                        reg_result = register_phone_number(result['formatted'], user_id, username)
-                        info += f"• {reg_result}\n"
-                
-                info += f"\n<i>查询时间：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</i>"
-                send_telegram_message(chat_id, info)
-            else:
-                response = f"""
-❌ <b>无效的电话号码格式</b>
+                    if result['operator'] != '未知':
+                        info += f"• 运营商：{result['operator']}\n"
+                    if result['state'] != '未知':
+                        info += f"• 归属地：{result['state']}\n"
+                    
+                    # 检查是否已注册
+                    with data_lock:
+                        if result['formatted'] in phone_registry:
+                            reg_info = phone_registry[result['formatted']]
+                            info += f"\n⚠️ <b>注册状态：</b>\n• 已被 @{reg_info['username']} 注册\n• 注册时间：{reg_info['timestamp'][:19]}\n"
+                        else:
+                            info += f"\n✅ <b>注册状态：</b> 可注册\n"
+                            # 自动注册号码
+                            reg_result = register_phone_number(result['formatted'], user_id, username)
+                            info += f"• {reg_result}\n"
+                    
+                    info += f"\n🎯 <b>智能提取：</b>从文本中自动识别\n"
+                    info += f"<i>查询时间：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</i>"
+                    send_telegram_message(chat_id, info)
+                    return
+            
+            # 如果所有提取的号码都无效
+            response = f"""
+❌ <b>未找到有效的马来西亚电话号码</b>
 
 您输入的内容：<code>{text}</code>
+检测到的候选号码：{', '.join([f'<code>{p}</code>' for p in extracted_phones])}
 
-请发送正确的马来西亚电话号码格式：
+💡 <b>可能的问题：</b>
+• 号码格式不正确
+• 不是马来西亚号码格式
+• 号码位数不符合要求
 
-📱 <b>手机号码格式：</b>
-• <code>012-3456789</code> (Maxis)
-• <code>011-6852782</code> (DiGi)
+📝 <b>正确格式示例：</b>
+• <code>012-3456789</code> (手机号码)
 • <code>+60 11-6852 8782</code> (国际格式)
-• <code>013-1234567</code> (Celcom)
-
-🏠 <b>固定电话格式：</b>
-• <code>03-12345678</code> (吉隆坡/雪兰莪)
-• <code>04-1234567</code> (槟城)
+• <code>03-12345678</code> (固定电话)
 
 发送 /help 查看完整格式说明 📖
 """
-                send_telegram_message(chat_id, response)
+            send_telegram_message(chat_id, response)
                 
     except Exception as e:
         print(f"处理消息错误: {e}")
@@ -479,14 +529,9 @@ class WebhookHandler(BaseHTTPRequestHandler):
             update = json.loads(post_data.decode())
             
             if 'message' in update:
-                # 在新线程中处理消息（异步处理）
-                threading.Thread(
-                    target=handle_message, 
-                    args=(update['message'],),
-                    daemon=True
-                ).start()
+                handle_message(update['message'])
             
-            # 返回200状态
+            # 返回成功响应
             self.send_response(200)
             self.send_header('Content-type', 'application/json')
             self.end_headers()
@@ -498,62 +543,55 @@ class WebhookHandler(BaseHTTPRequestHandler):
             self.end_headers()
     
     def do_GET(self):
-        # 健康检查端点
-        if self.path == '/health':
-            self.send_response(200)
-            self.send_header('Content-type', 'application/json')
-            self.end_headers()
-            
+        """健康检查端点"""
+        try:
+            memory_mb = get_memory_usage_estimate()
             status = {
                 'status': 'healthy',
-                'version': '1.2.0 Zero Dependency',
-                'timestamp': datetime.now().isoformat(),
-                'memory_estimate_mb': get_memory_usage_estimate(),
-                'phone_count': len(phone_registry),
-                'user_count': len(user_data),
-                'dependencies': 'none'
+                'version': '1.3.0 Final Fixed',
+                'phone_registry_size': len(phone_registry),
+                'user_data_size': len(user_data),
+                'memory_estimate_mb': memory_mb,
+                'timestamp': datetime.now().isoformat()
             }
             
-            self.wfile.write(json.dumps(status).encode())
-        else:
-            self.send_response(404)
+            response = json.dumps(status, ensure_ascii=False, indent=2)
+            
+            self.send_response(200)
+            self.send_header('Content-type', 'application/json; charset=utf-8')
+            self.end_headers()
+            self.wfile.write(response.encode('utf-8'))
+            
+        except Exception as e:
+            print(f"健康检查错误: {e}")
+            self.send_response(500)
             self.end_headers()
     
     def log_message(self, format, *args):
-        # 简化日志输出
-        return
+        """减少日志输出"""
+        pass
 
-def main():
-    """主函数"""
-    print("🚀 马来西亚电话号码机器人 - 零依赖版本启动中...")
-    print(f"📊 配置信息：")
-    print(f"   - 最大号码记录：{PRODUCTION_CONFIG['MAX_PHONE_REGISTRY_SIZE']:,}")
-    print(f"   - 最大用户记录：{PRODUCTION_CONFIG['MAX_USER_DATA_SIZE']:,}")
-    print(f"   - 数据保留天数：{PRODUCTION_CONFIG['DATA_RETENTION_DAYS']}")
-    print(f"   - 清理间隔：{PRODUCTION_CONFIG['DATA_CLEANUP_INTERVAL']}秒")
-    print("🔧 已修复号码识别问题，支持多种格式")
-    print("⚡ 零第三方依赖，部署更稳定")
-    
-    # 启动数据清理工作线程
-    cleanup_thread = threading.Thread(target=data_cleanup_worker, daemon=True)
-    cleanup_thread.start()
-    print("🧹 数据清理线程已启动")
-    
-    # 启动HTTP服务器
-    port = int(os.getenv('PORT', 8000))
-    server = HTTPServer(('0.0.0.0', port), WebhookHandler)
-    
-    print(f"🌐 服务器运行在端口 {port}")
-    print(f"💡 BOT Token: {BOT_TOKEN[:20]}...")
-    print(f"🔗 Webhook URL: {WEBHOOK_URL}")
-    print("✅ 系统已就绪，24/7稳定运行中！")
+def run_server():
+    """启动HTTP服务器"""
+    port = int(os.getenv('PORT', 10000))
     
     try:
+        server = HTTPServer(('', port), WebhookHandler)
+        print(f"马来西亚电话号码机器人已启动")
+        print(f"版本: 1.3.0 Final Fixed (智能提取版)")
+        print(f"端口: {port}")
+        print(f"内存估算: {get_memory_usage_estimate():.1f} MB")
+        print(f"时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        print("=" * 50)
+        
+        # 启动数据清理线程
+        cleanup_thread = threading.Thread(target=data_cleanup_worker, daemon=True)
+        cleanup_thread.start()
+        
         server.serve_forever()
-    except KeyboardInterrupt:
-        print("\n⏹️ 服务器正在关闭...")
-        server.shutdown()
-        print("👋 服务器已关闭")
+        
+    except Exception as e:
+        print(f"服务器启动错误: {e}")
 
 if __name__ == '__main__':
-    main()
+    run_server()
