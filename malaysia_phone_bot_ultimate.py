@@ -6,8 +6,8 @@
 完整记录号码出现历史和用户统计
  
 作者: MiniMax Agent
-版本: 1.5.0 Smart Tracking (Auto-Restart)
-更新时间: 2025-10-06
+版本: 1.7.0 Smart Tracking (User Display)
+更新时间: 2025-10-06 (v1.6.0 Enhanced Duplicates)
 """
 
 import json
@@ -384,6 +384,57 @@ def analyze_phone_number(normalized_phone):
         'formatted': normalized_phone
     }
 
+def get_user_display_name(user_id, user_info=None):
+    """获取用户显示名称"""
+    try:
+        with data_lock:
+            # 先从 user_data 中获取已存储的用户信息
+            if user_id in user_data:
+                stored_data = user_data[user_id]
+                first_name = stored_data.get('first_name', '')
+                last_name = stored_data.get('last_name', '')
+                username = stored_data.get('username', '')
+                
+                if first_name or last_name:
+                    return f"{first_name} {last_name}".strip()
+                elif username:
+                    return f"@{username}"
+            
+            # 如果传入了当前用户信息，使用当前信息
+            if user_info:
+                first_name = user_info.get('first_name', '')
+                last_name = user_info.get('last_name', '')
+                username = user_info.get('username', '')
+                
+                if first_name or last_name:
+                    return f"{first_name} {last_name}".strip()
+                elif username:
+                    return f"@{username}"
+            
+            # 从 phone_registry中查找已存储的名称
+            for phone_data in phone_registry.values():
+                if phone_data.get('user_id') == user_id:
+                    stored_name = phone_data.get('first_user_name')
+                    if stored_name:
+                        return stored_name
+                    
+                    # 尝试从存储的用户数据中构建名称
+                    first_name = phone_data.get('first_name', '')
+                    last_name = phone_data.get('last_name', '')
+                    username = phone_data.get('username', '')
+                    
+                    if first_name or last_name:
+                        return f"{first_name} {last_name}".strip()
+                    elif username:
+                        return f"@{username}"
+            
+            # 如果都没有，返回默认名称
+            return f"用户{user_id}"
+            
+    except Exception as e:
+        logger.error(f"获取用户显示名称错误: {e}")
+        return f"用户{user_id}"
+
 def send_telegram_message(chat_id, text, reply_to_message_id=None):
     """发送Telegram消息（带重试机制）"""
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
@@ -424,11 +475,12 @@ def handle_text(message_data):
             text = message_data.get('text', '')
             message_id = message_data.get('message_id')
             
-            # 更新用户活动时间
+            # 更新用户活动时间和信息
             with data_lock:
                 user_data[user_id]['last_activity'] = datetime.now().isoformat()
                 user_data[user_id]['username'] = message_data['from'].get('username', '')
                 user_data[user_id]['first_name'] = message_data['from'].get('first_name', '')
+                user_data[user_id]['last_name'] = message_data['from'].get('last_name', '')
             
             # 处理命令
             if text.startswith('/'):
@@ -452,7 +504,7 @@ def handle_text(message_data):
                 return
             
             # 分析和注册电话号码
-            response_parts = ["📱 <b>马来西亚电话号码分析结果</b>\n"]
+            response_parts = ["📞 <b>查号引导人</b>\n"]
             duplicates_found = False
             
             for phone in phone_numbers:
@@ -465,34 +517,63 @@ def handle_text(message_data):
                         phone_registry[phone]['last_seen'] = datetime.now().isoformat()
                         duplicates_found = True
                         
+                        # 获取首次记录用户信息
+                        first_user_id = phone_registry[phone].get('user_id')
+                        first_user_name = get_user_display_name(first_user_id) if first_user_id else "未知用户"
+                        # 格式化时间显示
+                        timestamp_str = phone_registry[phone]['timestamp']
+                        try:
+                            timestamp = datetime.fromisoformat(timestamp_str.replace('Z', '+00:00'))
+                            first_time = timestamp.strftime('%Y-%m-%d %H:%M:%S')
+                        except:
+                            first_time = timestamp_str[:19]  # 备用格式
+                        
+                        # 获取当前用户名称
+                        current_user_name = get_user_display_name(user_id, message_data['from'])
+                        
+                        # 判断是否是同一用户
+                        if first_user_id == user_id:
+                            duplicate_info = f"🔄 <b>您曾经记录过此号码</b>"
+                        else:
+                            duplicate_info = f"⚠️ <b>重复提醒</b>\n   📞 此号码已被用户 <b>{first_user_name}</b> 使用"
+                        
                         response_parts.append(
-                            f"🔄 <b>重复号码</b>: {analysis['formatted']}\n"
-                            f"   📍 {analysis['location']}\n"
-                            f"   📱 {analysis['carrier']}\n"
-                            f"   🔢 出现次数: {phone_registry[phone]['count']}\n"
-                            f"   ⏰ 首次记录: {phone_registry[phone]['timestamp'][:16]}\n"
+                            f"📞 <b>号码引导</b>\n"
+                            f"🔢 当前号码: {analysis['formatted']}\n"
+                            f"🇲🇾 号码归属地: {analysis['location']}\n"
+                            f"📱 首次记录时间: {first_time}\n"
+                            f"🔁 历史交互: {phone_registry[phone]['count']}次\n"
+                            f"👥 涉及用户: 1人\n\n"
+                            f"{duplicate_info}\n"
                         )
                     else:
+                        # 获取当前用户显示名称
+                        current_user_name = get_user_display_name(user_id, message_data['from'])
+                        
                         phone_registry[phone] = {
                             'timestamp': datetime.now().isoformat(),
                             'count': 1,
                             'last_seen': datetime.now().isoformat(),
                             'user_id': user_id,
-                            'chat_id': chat_id
+                            'chat_id': chat_id,
+                            'first_user_name': current_user_name,
+                            'username': message_data['from'].get('username', ''),
+                            'first_name': message_data['from'].get('first_name', ''),
+                            'last_name': message_data['from'].get('last_name', '')
                         }
                         
                         response_parts.append(
-                            f"✅ <b>新号码</b>: {analysis['formatted']}\n"
-                            f"   📍 {analysis['location']}\n"
-                            f"   📱 {analysis['carrier']}\n"
-                            f"   🆕 首次记录\n"
+                            f"📞 <b>号码引导</b>\n"
+                            f"🔢 当前号码: {analysis['formatted']}\n"
+                            f"🇲🇾 号码归属地: {analysis['location']}\n"
+                            f"📱 首次记录时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
+                            f"🔁 历史交互: 1次\n"
+                            f"👥 涉及用户: 1人\n\n"
+                            f"✅ <b>新号码记录</b>\n"
+                            f"   👤 记录者: {current_user_name}\n"
                         )
             
-            # 添加统计信息
-            response_parts.append(f"\n📊 <b>当前数据库</b>: {len(phone_registry)} 个号码")
-            
-            if duplicates_found:
-                response_parts.append("⚠️ 发现重复号码，已更新统计")
+            # 移除底部统计信息，保持显示简洁
             
             response_text = '\n'.join(response_parts)
             send_telegram_message(chat_id, response_text, message_id)
@@ -517,6 +598,7 @@ def handle_command(chat_id, user_id, command, message_id=None):
                 "🤖 <b>命令列表</b>:\n"
                 "/help - 帮助信息\n"
                 "/stats - 查看统计\n"
+                "/duplicates - 查看重复号码\n"
                 "/clear - 清理数据（管理员）\n\n"
                 f"🚀 <b>版本</b>: 1.5.0 Smart Tracking\n"
                 f"⏰ <b>启动时间</b>: {app_state['start_time'].strftime('%Y-%m-%d %H:%M:%S')}"
@@ -541,6 +623,7 @@ def handle_command(chat_id, user_id, command, message_id=None):
                 "/start - 欢迎信息\n"
                 "/help - 此帮助\n"
                 "/stats - 统计信息\n"
+                "/duplicates - 查看重复号码详情\n"
                 "/clear - 清理数据（仅管理员）\n\n"
                 "💡 <b>提示</b>: 直接发送包含号码的文本即可分析"
             )
@@ -562,11 +645,53 @@ def handle_command(chat_id, user_id, command, message_id=None):
                     f"💾 内存使用: {memory_mb:.1f} MB\n"
                     f"🧹 上次清理: {app_state['last_cleanup'].strftime('%H:%M:%S')}\n"
                     f"❤️ 上次健康检查: {app_state['last_health_check'].strftime('%H:%M:%S')}\n\n"
-                    f"🚀 版本: 1.5.0 Smart Tracking (Auto-Restart)\n"
+                    f"🚀 版本: 1.7.0 Smart Tracking (User Display)\n"
                     f"🔄 自动重启: {'✅ 已启用' if app_state['auto_restart_enabled'] else '❌ 已禁用'}"
                 )
                 
             send_telegram_message(chat_id, stats_text, message_id)
+            
+        elif command == '/duplicates':
+            with data_lock:
+                # 查找所有重复的号码（出现次数 > 1）
+                duplicate_phones = [(phone, data) for phone, data in phone_registry.items() if data.get('count', 0) > 1]
+                
+                if not duplicate_phones:
+                    send_telegram_message(
+                        chat_id,
+                        "🎉 <b>的好消息！</b>\n\n"
+                        "暂时没有发现重复的电话号码",
+                        message_id
+                    )
+                    return
+                
+                # 按重复次数排序
+                duplicate_phones.sort(key=lambda x: x[1].get('count', 0), reverse=True)
+                
+                duplicates_text_parts = ["🔄 <b>重复号码统计</b>\n"]
+                
+                for i, (phone, data) in enumerate(duplicate_phones[:10], 1):  # 只显示前10个
+                    analysis = analyze_phone_number(phone)
+                    count = data.get('count', 0)
+                    first_user_id = data.get('user_id')
+                    first_user_name = get_user_display_name(first_user_id) if first_user_id else "未知用户"
+                    first_time = data.get('timestamp', '')[:16]
+                    
+                    duplicates_text_parts.append(
+                        f"{i}. 📞 {analysis['formatted']}\n"
+                        f"   📍 {analysis['location']} | 📱 {analysis['carrier']}\n"
+                        f"   🔢 重复 {count} 次\n"
+                        f"   👤 首次: {first_user_name}\n"
+                        f"   ⏰ 时间: {first_time}\n"
+                    )
+                
+                if len(duplicate_phones) > 10:
+                    duplicates_text_parts.append(f"\n… 还有 {len(duplicate_phones) - 10} 个重复号码")
+                
+                duplicates_text_parts.append(f"\n📊 总计: {len(duplicate_phones)} 个重复号码")
+                
+                duplicates_text = '\n'.join(duplicates_text_parts)
+                send_telegram_message(chat_id, duplicates_text, message_id)
             
         elif command == '/clear':
             # 简化的管理员检查
@@ -668,8 +793,8 @@ class WebhookHandler(BaseHTTPRequestHandler):
                     
                     <div class="info">
                         <h3>🚀 版本信息</h3>
-                        <p>版本: 1.5.0 Smart Tracking (Auto-Restart)</p>
-                        <p>更新时间: 2025-10-06</p>
+                        <p>版本: 1.7.0 Smart Tracking (User Display)</p>
+                        <p>更新时间: 2025-10-06 (v1.6.0 Enhanced Duplicates)</p>
                         <p>作者: MiniMax Agent</p>
                     </div>
                 </div>
@@ -767,7 +892,7 @@ def run_server():
     # 记录启动信息
     logger.info("=" * 60)
     logger.info("🚀 马来西亚电话号码机器人已启动 (长期运行版)")
-    logger.info(f"📦 版本: 1.5.0 Smart Tracking (Auto-Restart)")
+    logger.info(f"📦 版本: 1.7.0 Smart Tracking (User Display)")
     logger.info(f"🌐 端口: {port}")
     logger.info(f"💾 内存估算: {get_memory_usage_estimate()} MB")
     logger.info(f"⏰ 启动时间: {app_state['start_time']}")
