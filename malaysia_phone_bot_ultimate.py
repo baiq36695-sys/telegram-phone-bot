@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-马来西亚电话号码机器人 - 最终修复版本
-专为Render等云平台设计，零依赖，智能号码提取
-包含完整功能和性能优化
+马来西亚电话号码机器人 - 智能追踪版本
+专为Render等云平台设计，零依赖，智能提取+重复追踪
+完整记录号码出现历史和用户统计
  
 作者: MiniMax Agent
-版本: 1.3.0 Final Fixed
+版本: 1.5.0 Smart Tracking
 更新时间: 2025-10-06
 """
 
@@ -89,6 +89,15 @@ STATE_MAPPING = {
     '087': '砂拉越林梦',
     '088': '沙巴亚庇',
     '089': '沙巴山打根'
+}
+
+# 手机号码归属地映射（运营商覆盖范围）
+MOBILE_COVERAGE_MAPPING = {
+    'Maxis': '🇲🇾 Maxis全马来西亚',
+    'Celcom': '🇲🇾 Celcom全马来西亚', 
+    'DiGi': '🇲🇾 DiGi全马来西亚',
+    'U Mobile': '🇲🇾 U Mobile全马来西亚',
+    '未知运营商': '🇲🇾 马来西亚'
 }
 
 OPERATOR_MAPPING = {
@@ -231,6 +240,7 @@ def analyze_phone_number(phone):
         'type': '未知',
         'operator': '未知',
         'state': '未知',
+        'coverage': '未知',
         'valid': False
     }
     
@@ -253,39 +263,64 @@ def analyze_phone_number(phone):
                     result['operator'] = 'DiGi'
                 elif pattern_name == 'mobile_umobile':
                     result['operator'] = 'U Mobile'
+                
+                # 设置手机号码归属地（全国覆盖）
+                result['coverage'] = MOBILE_COVERAGE_MAPPING.get(result['operator'], '🇲🇾 马来西亚')
                     
             elif pattern_name.startswith('landline_'):
                 result['type'] = '固定电话'
                 prefix = phone[:3] if len(phone) >= 10 else phone[:2]
                 result['state'] = STATE_MAPPING.get(prefix, '未知地区')
+                if result['state'] != '未知地区':
+                    result['coverage'] = f"🇲🇾 {result['state']}"
+                else:
+                    result['coverage'] = '🇲🇾 马来西亚'
                 
             elif pattern_name == 'toll_free':
                 result['type'] = '免费电话'
                 result['operator'] = '全网通用'
+                result['coverage'] = '🇲🇾 全马来西亚'
                 
             elif pattern_name == 'premium':
                 result['type'] = '增值服务号码'
                 result['operator'] = '付费服务'
+                result['coverage'] = '🇲🇾 全马来西亚'
             
             break
     
     return result
 
 def register_phone_number(phone, user_id, username):
-    """注册电话号码"""
+    """注册电话号码（增强版，跟踪重复和用户）"""
     with data_lock:
         current_time = datetime.now().isoformat()
         
-        # 检查重复
+        # 检查是否已存在
         if phone in phone_registry:
             existing = phone_registry[phone]
-            return f"❌ 号码已被用户 @{existing['username']} 注册"
+            # 更新重复信息
+            if 'repeat_count' not in existing:
+                existing['repeat_count'] = 1
+                existing['users'] = [existing['username']]
+            
+            existing['repeat_count'] += 1
+            if username not in existing['users']:
+                existing['users'].append(username)
+            
+            existing['last_seen'] = current_time
+            existing['last_user'] = username
+            
+            return f"❌ 号码重复"
         
-        # 注册号码
+        # 注册新号码
         phone_registry[phone] = {
             'user_id': user_id,
             'username': username,
-            'timestamp': current_time
+            'timestamp': current_time,
+            'repeat_count': 1,
+            'users': [username],
+            'last_seen': current_time,
+            'last_user': username
         }
         
         return f"✅ 号码注册成功"
@@ -337,13 +372,13 @@ def handle_message(message):
         # 处理命令
         if text.startswith('/start'):
             response = """
-🇲🇾 <b>马来西亚电话号码查询机器人</b>
+🇲🇾 <b>马来西亚电话号码引导机器人</b>
 
-📱 <b>功能说明：</b>
-• 发送电话号码进行查询
-• 支持手机号码和固定电话
-• 自动识别运营商和地区
-• 号码注册和管理
+📱 <b>核心功能：</b>
+• 智能提取和识别马来西亚电话号码
+• 显示详细的号码归属地信息
+• 记录首次出现时间
+• 追踪号码重复和涉及用户
 
 💡 <b>使用方法：</b>
 直接发送包含号码的消息，支持多种格式：
@@ -352,12 +387,19 @@ def handle_message(message):
 <code>发送到 +60 13-970 3152</code>
 <code>联系电话：60123456789</code>
 
+📊 <b>显示信息：</b>
+• 当前号码 + 号码归属地
+• 首次出现时间
+• 历史交换次数
+• 涉及用户统计
+• 重复提醒详情
+
 🔧 <b>管理命令：</b>
 /status - 查看系统状态
 /clear - 清除个人数据
 /help - 查看帮助
 
-<i>智能提取版本，识别更准确 🎯</i>
+<i>智能追踪版本，完整记录 📊</i>
 """
             send_telegram_message(chat_id, response)
             
@@ -385,10 +427,20 @@ def handle_message(message):
 • 增值服务：600
 
 <b>📱 运营商识别：</b>
-• Maxis: 012, 014, 017, 019
-• Celcom: 013, 019
-• DiGi: 010, 011, 016
-• U Mobile: 015, 018
+• Maxis: 012, 014, 017, 019 (🇲🇾 全马来西亚)
+• Celcom: 013, 019 (🇲🇾 全马来西亚)
+• DiGi: 010, 011, 016 (🇲🇾 全马来西亚)
+• U Mobile: 015, 018 (🇲🇾 全马来西亚)
+
+<b>🏠 固定电话归属地：</b>
+• 03: 吉隆坡/雪兰莪
+• 04: 槟城
+• 05: 霹雳
+• 06: 马六甲
+• 07: 柔佛
+• 09: 彭亨/登嘉楼/吉兰丹
+• 082-087: 砂拉越各地区
+• 088-089: 沙巴各地区
 """
             send_telegram_message(chat_id, response)
             
@@ -409,9 +461,10 @@ def handle_message(message):
 
 🚀 <b>运行状态：</b>
 • 服务状态：正常运行
-• 版本信息：Final Fixed 1.3.0
+• 版本信息：Smart Tracking 1.5.0
 • 更新时间：2025-10-06
-• 识别引擎：智能提取已启用
+• 识别引擎：智能提取+重复追踪
+• 追踪系统：实时记录已启用
 • 依赖状态：零第三方依赖
 
 <i>系统运行稳定，号码识别正常 ✅</i>
@@ -460,34 +513,55 @@ def handle_message(message):
             for phone_candidate in extracted_phones:
                 result = analyze_phone_number(phone_candidate)
                 if result and result['valid']:
-                    # 构建详细信息
-                    info = f"""
-📱 <b>号码分析结果</b>
-
-🔢 <b>号码信息：</b>
-• 原始号码：<code>{result['original']}</code>
-• 标准格式：<code>{result['formatted']}</code>
-• 号码类型：{result['type']}
-
-"""
-                    if result['operator'] != '未知':
-                        info += f"• 运营商：{result['operator']}\n"
-                    if result['state'] != '未知':
-                        info += f"• 归属地：{result['state']}\n"
+                    current_time = datetime.now()
                     
-                    # 检查是否已注册
+                    # 检查是否已注册并处理
                     with data_lock:
                         if result['formatted'] in phone_registry:
-                            reg_info = phone_registry[result['formatted']]
-                            info += f"\n⚠️ <b>注册状态：</b>\n• 已被 @{reg_info['username']} 注册\n• 注册时间：{reg_info['timestamp'][:19]}\n"
-                        else:
-                            info += f"\n✅ <b>注册状态：</b> 可注册\n"
-                            # 自动注册号码
+                            # 先更新重复信息
                             reg_result = register_phone_number(result['formatted'], user_id, username)
-                            info += f"• {reg_result}\n"
-                    
-                    info += f"\n🎯 <b>智能提取：</b>从文本中自动识别\n"
-                    info += f"<i>查询时间：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</i>"
+                            reg_info = phone_registry[result['formatted']]
+                            
+                            # 显示重复信息
+                            first_time = reg_info['timestamp'][:19].replace('T', ' ')
+                            repeat_count = reg_info.get('repeat_count', 1)
+                            users_list = reg_info.get('users', [reg_info['username']])
+                            user_count = len(users_list)
+                            
+                            info = f"""
+📱 <b>号码引导人</b>
+
+📱 当前号码：<code>{result['formatted']}</code>
+📍 号码归属地：{result['coverage']}
+⏰ 首次出现时间：{first_time}
+🔄 历史交换：{repeat_count}次
+👥 涉及用户：{user_count}人
+
+❌ <b>重复提醒：</b>
+"""
+                            if user_count == 1:
+                                info += f"此号码已被用户 @{users_list[0]} 使用"
+                            else:
+                                info += f"此号码已被多个用户使用：\n"
+                                for i, user in enumerate(users_list, 1):
+                                    info += f"  {i}. @{user}\n"
+                                    
+                        else:
+                            # 新号码 - 自动注册并显示
+                            reg_result = register_phone_number(result['formatted'], user_id, username)
+                            current_time_str = current_time.strftime('%Y-%m-%d %H:%M:%S')
+                            
+                            info = f"""
+📱 <b>号码引导人</b>
+
+📱 当前号码：<code>{result['formatted']}</code>
+📍 号码归属地：{result['coverage']}
+⏰ 首次出现时间：{current_time_str}
+🔄 历史交换：1次
+👥 涉及用户：1人
+
+✅ <b>新录：</b>首次记录！
+"""
                     send_telegram_message(chat_id, info)
                     return
             
