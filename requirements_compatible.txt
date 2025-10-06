@@ -1,4 +1,4 @@
 python-telegram-bot==13.7
-phonumbers==8.12.57
 Flask==2.0.3
-requests==2.28.2
+requests==2.28.1
+pytz==2022.1
