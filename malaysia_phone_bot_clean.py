@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-管号机器人 v12.0 - 最新版
-按照用户要求：显示用户真实姓名，号码地区，添加清理功能
+管号机器人 v13.0 - 归属地最终版
+专门显示号码归属地信息
 使用Python内置库实现
 """
 
@@ -22,9 +22,23 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 BOT_TOKEN = '8424823618:AAFwjIYQH86nKXOiJUybfBRio7sRJl-GUEU'
 TELEGRAM_API = f'https://api.telegram.org/bot{BOT_TOKEN}'
 
-# 马来西亚州属区号和归属地
-MALAYSIA_AREA_CODES = {
-    # 固话区号
+# 马来西亚手机号码运营商和归属地
+MALAYSIA_MOBILE_PREFIXES = {
+    '010': 'DiGi',
+    '011': 'DiGi', 
+    '012': 'Maxis',
+    '013': 'DiGi',
+    '014': 'DiGi',
+    '015': 'DiGi',
+    '016': 'DiGi',
+    '017': 'Maxis',
+    '018': 'U Mobile',
+    '019': 'DiGi',
+    '020': 'Electcoms'
+}
+
+# 马来西亚固话区号和归属地
+MALAYSIA_LANDLINE_CODES = {
     '03': '雪兰莪/吉隆坡/布城',
     '04': '吉打/槟城',
     '05': '霹雳',
@@ -42,31 +56,6 @@ MALAYSIA_AREA_CODES = {
     '089': '沙巴根地咬'
 }
 
-# 马来西亚手机号码归属地（基于前缀）
-MALAYSIA_MOBILE_CARRIERS = {
-    '010': '天地通信(DiGi)',
-    '011': '天地通信(DiGi)',
-    '012': '明讯(Maxis)',
-    '013': '天地通信(DiGi)',
-    '014': '天地通信(DiGi)',
-    '016': '天地通信(DiGi)',
-    '017': '马来西亚电信(Maxis)',
-    '018': 'U Mobile',
-    '019': '天地通信(DiGi)',
-    '010': '明讯(Maxis)',
-    '015': '天地通信(DiGi)',
-    '020': '电讯盈科(PCCW-HKT)',
-}
-
-# 手机号码运营商归属地
-MOBILE_CARRIER_REGIONS = {
-    '天地通信(DiGi)': '全马来西亚',
-    '明讯(Maxis)': '全马来西亚', 
-    'U Mobile': '全马来西亚',
-    '马来西亚电信(Maxis)': '全马来西亚',
-    '电讯盈科(PCCW-HKT)': '全马来西亚'
-}
-
 class PhoneNumberState:
     """线程安全的电话号码状态管理"""
     def __init__(self):
@@ -76,8 +65,8 @@ class PhoneNumberState:
         self.last_heartbeat = None
         self.message_count = 0
         
-        # 全局号码注册表 - 记录每个号码的首次出现
-        self.phone_registry = {}  # {标准化号码: {'first_seen': datetime, 'count': int, 'users': set, 'first_user': user_id, 'first_user_name': str, 'first_user_data': dict}}
+        # 全局号码注册表
+        self.phone_registry = {}
         
         # 用户数据
         self.user_data = defaultdict(lambda: {
@@ -91,13 +80,12 @@ class PhoneNumberState:
             'hourly_stats': defaultdict(int),
             'carrier_stats': defaultdict(int),
             'daily_queries': defaultdict(int),
-            'username': None,  # 存储用户名
-            'first_name': None,  # 存储真实姓名
+            'username': None,
+            'first_name': None,
             'last_name': None
         })
         
-        # 用户ID到用户名的映射
-        self.user_names = {}  # {user_id: username or first_name}
+        self.user_names = {}
         
         self.global_stats = {
             'total_queries': 0,
@@ -113,7 +101,7 @@ class PhoneNumberState:
         # 启动心跳线程
         self.heartbeat_thread = threading.Thread(target=self._heartbeat_worker, daemon=True)
         self.heartbeat_thread.start()
-        print("✅ 管号机器人系统启动（v12.0）")
+        print("✅ 管号机器人系统启动（v13.0 归属地版）")
 
     def _heartbeat_worker(self):
         """心跳监控线程"""
@@ -122,7 +110,7 @@ class PhoneNumberState:
                 with self._lock:
                     self.heartbeat_count += 1
                     self.last_heartbeat = datetime.now()
-                time.sleep(300)  # 5分钟心跳
+                time.sleep(300)
             except Exception as e:
                 print(f"心跳监控错误: {e}")
                 time.sleep(60)
@@ -130,12 +118,10 @@ class PhoneNumberState:
     def update_user_info(self, user_id, user_info):
         """更新用户信息"""
         with self._lock:
-            # 提取用户名或姓名
             username = user_info.get('username')
             first_name = user_info.get('first_name', '')
             last_name = user_info.get('last_name', '')
             
-            # 存储完整的用户信息
             self.user_data[user_id]['username'] = username
             self.user_data[user_id]['first_name'] = first_name
             self.user_data[user_id]['last_name'] = last_name
@@ -151,7 +137,7 @@ class PhoneNumberState:
             self.user_names[user_id] = display_name
 
     def get_user_display_name(self, user_id):
-        """获取用户显示名称（优先真实姓名）"""
+        """获取用户显示名称"""
         user_data = self.user_data[user_id]
         first_name = user_data.get('first_name', '')
         last_name = user_data.get('last_name', '')
@@ -171,7 +157,6 @@ class PhoneNumberState:
             current_user_name = self.get_user_display_name(user_id)
             
             if normalized_phone in self.phone_registry:
-                # 号码已存在，更新统计
                 registry_entry = self.phone_registry[normalized_phone]
                 registry_entry['count'] += 1
                 registry_entry['users'].add(user_id)
@@ -188,7 +173,6 @@ class PhoneNumberState:
                     'formatted_phone': self._format_phone_display(normalized_phone)
                 }
             else:
-                # 新号码，首次记录
                 self.phone_registry[normalized_phone] = {
                     'first_seen': current_time,
                     'count': 1,
@@ -216,7 +200,6 @@ class PhoneNumberState:
             self.user_data.clear()
             self.user_names.clear()
             
-            # 重置全局统计
             self.global_stats.update({
                 'total_queries': 0,
                 'total_users': 0,
@@ -261,13 +244,11 @@ class PhoneNumberState:
                 today = current_time.date().isoformat()
                 hour = current_time.hour
                 
-                # 更新用户数据
                 user_data = self.user_data[user_id]
                 user_data['last_seen'] = current_time.isoformat()
                 user_data['query_count'] += 1
                 user_data['phone_numbers_found'] += phone_numbers_found
                 
-                # 每日查询重置
                 if user_data['last_query_date'] != today:
                     user_data['queries_today'] = 0
                     user_data['last_query_date'] = today
@@ -276,19 +257,15 @@ class PhoneNumberState:
                 user_data['hourly_stats'][hour] += 1
                 user_data['daily_queries'][today] += 1
                 
-                # 记录运营商统计
                 if carriers:
                     for carrier in carriers:
                         user_data['carrier_stats'][carrier] += 1
                         self.global_stats['carrier_distribution'][carrier] += 1
                 
-                # 更新全局统计
                 self.global_stats['total_queries'] += 1
                 self.global_stats['total_phone_numbers'] += phone_numbers_found
                 self.global_stats['hourly_distribution'][hour] += 1
                 self.global_stats['daily_stats'][today] += 1
-                
-                # 更新用户总数
                 self.global_stats['total_users'] = len(self.user_data)
                 
                 self.message_count += 1
@@ -324,18 +301,17 @@ class PhoneNumberState:
 phone_state = PhoneNumberState()
 
 def clean_malaysia_phone_number(text):
-    """专门清理和提取马来西亚电话号码（修复版）"""
+    """提取马来西亚电话号码"""
     if not text:
         return []
     
-    # 马来西亚电话号码格式的正则表达式（更宽松的匹配）
     patterns = [
-        r'\+60\s*[1-9][\d\s\-]{7,12}',      # +60格式（更宽松）
-        r'60\s*[1-9][\d\s\-]{7,12}',       # 60开头
-        r'0\s*[1-9][\d\s\-]{6,11}',        # 0开头的本地格式
-        r'[1-9][\d\s\-]{6,11}',            # 去掉国家代码的格式
-        r'01[0-9][\d\s\-]{6,9}',           # 手机号格式
-        r'0[2-9]\d[\d\s\-]{5,9}'           # 固话格式
+        r'\+60\s*[1-9][\d\s\-]{7,12}',
+        r'60\s*[1-9][\d\s\-]{7,12}',
+        r'0\s*[1-9][\d\s\-]{6,11}',
+        r'[1-9][\d\s\-]{6,11}',
+        r'01[0-9][\d\s\-]{6,9}',
+        r'0[2-9]\d[\d\s\-]{5,9}'
     ]
     
     phone_numbers = []
@@ -343,48 +319,38 @@ def clean_malaysia_phone_number(text):
         matches = re.findall(pattern, text)
         phone_numbers.extend(matches)
     
-    # 清理和标准化
     cleaned_numbers = []
     for number in phone_numbers:
-        # 移除空格、横线、括号、加号
         clean_num = re.sub(r'[\s\-().+]', '', number)
-        
-        # 只保留数字
         clean_num = re.sub(r'[^\d]', '', clean_num)
         
-        # 标准化为60格式
         if clean_num.startswith('60'):
-            pass  # 已经是60开头
+            pass
         elif clean_num.startswith('0'):
             clean_num = '60' + clean_num[1:]
-        elif len(clean_num) >= 8:  # 假设是本地号码
+        elif len(clean_num) >= 8:
             clean_num = '60' + clean_num
         
-        # 验证长度（马来西亚号码加60应该是11-13位）
         if 11 <= len(clean_num) <= 13:
             cleaned_numbers.append(clean_num)
     
-    return list(set(cleaned_numbers))  # 去重
+    return list(set(cleaned_numbers))
 
 def analyze_malaysia_phone(phone_number):
-    """分析马来西亚电话号码（归属地版）"""
+    """分析马来西亚电话号码并返回归属地"""
     analysis = {
         'original': phone_number,
         'normalized': '',
         'is_valid': False,
-        'number_type': '未知',
-        'carrier': '未知',
-        'region': '未知',
         'location': '未知归属地',
+        'carrier': '未知',
         'flag': '🇲🇾',
         'description': '马来西亚号码'
     }
     
     try:
-        # 清理号码
         clean_number = re.sub(r'[^\d]', '', phone_number)
         
-        # 标准化为60开头
         if clean_number.startswith('60'):
             normalized = clean_number
         elif clean_number.startswith('0'):
@@ -394,60 +360,43 @@ def analyze_malaysia_phone(phone_number):
         
         analysis['normalized'] = normalized
         
-        # 验证长度
         if len(normalized) < 11 or len(normalized) > 13:
             return analysis
         
-        # 提取本地号码部分
-        local_number = normalized[2:]  # 去掉60
+        local_number = normalized[2:]
         
         if len(local_number) >= 3:
-            # 检查手机号码（以1开头）
+            # 手机号码分析
             if local_number.startswith('1'):
-                # 手机号码归属地分析
-                mobile_prefix = local_number[:3]  # 取前3位
+                mobile_prefix = local_number[:3]
                 
-                if mobile_prefix in MALAYSIA_MOBILE_CARRIERS:
-                    carrier_name = MALAYSIA_MOBILE_CARRIERS[mobile_prefix]
-                    analysis['carrier'] = carrier_name
-                    analysis['region'] = MOBILE_CARRIER_REGIONS.get(carrier_name, '全马来西亚')
-                    analysis['location'] = f'{carrier_name}·{analysis["region"]}'
-                    analysis['number_type'] = f'📱 {analysis["location"]}'
+                if mobile_prefix in MALAYSIA_MOBILE_PREFIXES:
+                    carrier = MALAYSIA_MOBILE_PREFIXES[mobile_prefix]
+                    analysis['carrier'] = carrier
+                    analysis['location'] = f'{carrier}手机'
                     analysis['is_valid'] = True
                 else:
-                    # 未知手机运营商，但仍是手机号
                     analysis['carrier'] = '马来西亚手机'
-                    analysis['region'] = '全马来西亚'
-                    analysis['location'] = '马来西亚手机网络'
-                    analysis['number_type'] = f'📱 {analysis["location"]}'
+                    analysis['location'] = '马来西亚手机'
                     analysis['is_valid'] = True
             
+            # 固话号码分析
             else:
-                # 固话号码归属地分析
                 area_code = local_number[:2]
-                
-                # 检查3位区号（沙捞越地区）
                 if area_code == '08' and len(local_number) >= 3:
                     area_code = local_number[:3]
                 
-                if area_code in MALAYSIA_AREA_CODES:
-                    region_name = MALAYSIA_AREA_CODES[area_code]
+                if area_code in MALAYSIA_LANDLINE_CODES:
+                    region = MALAYSIA_LANDLINE_CODES[area_code]
                     analysis['carrier'] = '固定电话'
-                    analysis['region'] = region_name
-                    analysis['location'] = f'固话·{region_name}'
-                    analysis['number_type'] = f'🏠 {analysis["location"]}'
+                    analysis['location'] = region
                     analysis['is_valid'] = True
                 else:
-                    # 未知固话区号
                     analysis['carrier'] = '固定电话'
-                    analysis['region'] = '马来西亚'
-                    analysis['location'] = '马来西亚固话'
-                    analysis['number_type'] = f'🏠 {analysis["location"]}'
+                    analysis['location'] = '马来西亚'
                     analysis['is_valid'] = True
         
-        # 如果仍然未知，但长度合理，标记为可能有效
-        if analysis['number_type'] == '未知' and 8 <= len(local_number) <= 11:
-            analysis['number_type'] = '🇲🇾 马来西亚号码'
+        if analysis['location'] == '未知归属地' and 8 <= len(local_number) <= 11:
             analysis['location'] = '马来西亚'
             analysis['is_valid'] = True
             analysis['carrier'] = '未知运营商'
@@ -460,13 +409,12 @@ def analyze_malaysia_phone(phone_number):
 def send_telegram_message(chat_id, text, parse_mode='Markdown'):
     """发送Telegram消息"""
     try:
-        # 分割长消息
         max_length = 4000
         if len(text) > max_length:
             parts = [text[i:i+max_length] for i in range(0, len(text), max_length)]
             for part in parts:
                 send_single_message(chat_id, part, parse_mode)
-                time.sleep(0.5)  # 避免速率限制
+                time.sleep(0.5)
         else:
             send_single_message(chat_id, text, parse_mode)
     except Exception as e:
@@ -481,10 +429,8 @@ def send_single_message(chat_id, text, parse_mode='Markdown'):
             'parse_mode': parse_mode
         }
         
-        # URL编码
         params = urllib.parse.urlencode(data).encode('utf-8')
         
-        # 发送请求
         req = urllib.request.Request(
             f'{TELEGRAM_API}/sendMessage',
             data=params,
@@ -506,10 +452,11 @@ def handle_start_command(chat_id, user_id):
     welcome_text = f"""🗣️ **欢迎使用管号机器人!**
 
 🔍 **专业功能:**
-• 📱 马来西亚手机和固话识别
+• 📱 马来西亚手机和固话识别  
 • ⏰ 首次出现时间记录
 • 🔄 重复号码检测及关联信息
 • 👥 用户追踪和统计
+• 📍 精准归属地显示
 
 📱 **支持的马来西亚号码格式:**
 ```
@@ -529,11 +476,9 @@ def handle_start_command(chat_id, user_id):
 def handle_phone_message(chat_id, user_id, message_text, user_info=None):
     """处理包含电话号码的消息"""
     try:
-        # 更新用户信息
         if user_info:
             phone_state.update_user_info(user_id, user_info)
         
-        # 提取马来西亚电话号码
         phone_numbers = clean_malaysia_phone_number(message_text)
         
         if not phone_numbers:
@@ -549,34 +494,28 @@ def handle_phone_message(chat_id, user_id, message_text, user_info=None):
             send_telegram_message(chat_id, response_text)
             return
         
-        # 分析每个号码
         analyses = []
         carriers_found = set()
         
         for phone in phone_numbers:
             analysis = analyze_malaysia_phone(phone)
-            
-            # 注册号码并检查重复
             duplicate_info = phone_state.register_phone_number(phone, user_id, user_info)
             analysis['duplicate_info'] = duplicate_info
-            
             analyses.append(analysis)
             
             if analysis['carrier'] != '未知':
                 carriers_found.add(analysis['carrier'])
 
-        # 记录统计
         phone_state.record_query(user_id, len(phone_numbers), list(carriers_found))
 
-        # 构建响应（按图片格式显示）
+        # 构建响应（完全按照您的图片格式）
         if len(analyses) == 1:
-            # 单个号码分析
             analysis = analyses[0]
             duplicate_info = analysis['duplicate_info']
             current_time = datetime.now()
             
             response_text = f"""🗣️ 当前号码: {duplicate_info['formatted_phone']}
-📍 号码归属: {analysis['number_type']}
+📍 号码地区: 🇲🇾 {analysis['location']}
 
 👤 当前用户: {duplicate_info['current_user_name']}
 ⏰ 当前时间: {current_time.strftime('%Y-%m-%d %H:%M:%S')}
@@ -589,14 +528,12 @@ def handle_phone_message(chat_id, user_id, message_text, user_info=None):
 📈 历史交叉数: {duplicate_info['occurrence_count']}次
 👥 涉及用户: {duplicate_info['total_users']}人"""
 
-            # 根据是否重复显示状态
             if duplicate_info['is_duplicate']:
                 response_text += f"\n\n⚠️ 请注意: 此号码已被使用!"
             else:
                 response_text += f"\n\n✅ 新号码: 首次记录!"
 
         else:
-            # 多个号码批量分析
             response_text = f"""🔍 批量检测: 共{len(analyses)}个号码
 
 """
@@ -607,7 +544,7 @@ def handle_phone_message(chat_id, user_id, message_text, user_info=None):
                 
                 response_text += f"""───── 号码 {i} ─────
 🗣️ 当前号码: {duplicate_info['formatted_phone']}
-📍 号码归属: {analysis['number_type']}
+📍 号码地区: 🇲🇾 {analysis['location']}
 
 👤 当前用户: {duplicate_info['current_user_name']}
 ⏰ 当前时间: {current_time.strftime('%Y-%m-%d %H:%M:%S')}
@@ -632,7 +569,7 @@ def handle_phone_message(chat_id, user_id, message_text, user_info=None):
         send_telegram_message(chat_id, "❌ 处理错误，请重试。")
 
 def handle_clear_command(chat_id, user_id):
-    """处理/clear命令 - 清理所有数据"""
+    """处理/clear命令"""
     phone_state.record_query(user_id)
     
     try:
@@ -642,7 +579,7 @@ def handle_clear_command(chat_id, user_id):
 
 ✅ **已清理的内容:**
 • 所有电话号码记录
-• 所有用户统计数据
+• 所有用户统计数据  
 • 所有重复检测历史
 • 系统统计信息
 
@@ -669,6 +606,7 @@ def handle_help_command(chat_id, user_id):
 • 记录首次出现时间
 • 检测重复号码及关联信息
 • 用户追踪和统计
+• 显示精准归属地
 
 📱 **支持格式:**
 • +60 11-6852 8782（国际格式）
@@ -693,11 +631,8 @@ def handle_stats_command(chat_id, user_id):
     phone_state.record_query(user_id)
     user_data = phone_state.get_user_stats(user_id)
     
-    # 计算使用天数
     first_seen = datetime.fromisoformat(user_data['first_seen'])
     days_using = (datetime.now() - first_seen).days + 1
-    
-    # 获取用户显示名称
     display_name = phone_state.get_user_display_name(user_id)
     
     stats_text = f"""📊 **您的使用统计**
@@ -736,9 +671,9 @@ def handle_status_command(chat_id, user_id):
 • 重复检测: {global_stats['total_duplicates']:,} 次
 
 💡 **版本信息:**
-• 机器人版本: v12.0 最新版
+• 机器人版本: v13.0 归属地最终版
 • 更新时间: 2025年10月
-• 新增功能: 真实姓名显示、清理功能"""
+• 特色功能: 精准归属地显示"""
     
     send_telegram_message(chat_id, status_text)
 
@@ -747,23 +682,16 @@ class TelegramWebhookHandler(BaseHTTPRequestHandler):
     
     def do_POST(self):
         try:
-            # 读取请求数据
             content_length = int(self.headers['Content-Length'])
             post_data = self.rfile.read(content_length)
-            
-            # 解析JSON数据
             update = json.loads(post_data.decode('utf-8'))
             
-            # 处理消息
             if 'message' in update:
                 message = update['message']
                 chat_id = message['chat']['id']
                 user_id = message['from']['id']
-                
-                # 获取用户信息
                 user_info = message['from']
                 
-                # 处理文本消息
                 if 'text' in message:
                     text = message['text'].strip()
                     
@@ -778,10 +706,8 @@ class TelegramWebhookHandler(BaseHTTPRequestHandler):
                     elif text.startswith('/clear'):
                         handle_clear_command(chat_id, user_id)
                     else:
-                        # 检查是否包含电话号码
                         handle_phone_message(chat_id, user_id, text, user_info)
             
-            # 返回成功响应
             self.send_response(200)
             self.send_header('Content-type', 'application/json')
             self.end_headers()
@@ -789,7 +715,6 @@ class TelegramWebhookHandler(BaseHTTPRequestHandler):
             
         except Exception as e:
             print(f"Webhook处理错误: {e}")
-            # 返回错误响应
             self.send_response(500)
             self.end_headers()
     
@@ -802,7 +727,7 @@ class TelegramWebhookHandler(BaseHTTPRequestHandler):
                 'status': 'healthy',
                 'uptime': system_status['uptime'],
                 'message_count': system_status['message_count'],
-                'version': 'v12.0-最新版'
+                'version': 'v13.0-归属地最终版'
             }
             
             self.send_response(200)
@@ -822,7 +747,6 @@ class TelegramWebhookHandler(BaseHTTPRequestHandler):
 def setup_webhook():
     """设置Webhook"""
     try:
-        # 获取Render提供的URL
         render_url = os.environ.get('RENDER_EXTERNAL_URL')
         if not render_url:
             print("❌ 未找到RENDER_EXTERNAL_URL环境变量")
@@ -830,7 +754,6 @@ def setup_webhook():
         
         webhook_url = f"{render_url}/webhook"
         
-        # 设置webhook
         data = urllib.parse.urlencode({'url': webhook_url}).encode('utf-8')
         req = urllib.request.Request(
             f'{TELEGRAM_API}/setWebhook',
@@ -853,26 +776,22 @@ def setup_webhook():
 
 def main():
     """主程序"""
-    print("🚀 启动管号机器人（v12.0 最新版）...")
+    print("🚀 启动管号机器人（v13.0 归属地最终版）...")
     
-    # 获取端口
     port = int(os.environ.get('PORT', 8000))
     
     try:
-        # 设置Webhook
         if setup_webhook():
             print("✅ Webhook配置完成")
         else:
             print("⚠️  Webhook配置失败，但继续运行")
         
-        # 启动HTTP服务器
         server = HTTPServer(('0.0.0.0', port), TelegramWebhookHandler)
         print(f"🌐 HTTP服务器启动在端口 {port}")
         print(f"🔧 平台: {platform.platform()}")
         print(f"🐍 Python: {platform.python_version()}")
         print("✅ 系统就绪，等待消息...")
         
-        # 运行服务器
         server.serve_forever()
         
     except KeyboardInterrupt:
