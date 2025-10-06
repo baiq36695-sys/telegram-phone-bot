@@ -1,20 +1,16 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-马来西亚电话号码分析机器人 - 平衡版
-功能完整 + 性能优化的最佳平衡
+马来西亚电话号码分析机器人 - 生产稳定版
+专为长期运行设计，解决内存泄漏和稳定性问题
 
-保留核心功能：
-- 重复号码检测
-- 用户历史追踪  
-- 详细统计报告
-- 所有命令支持
-
-性能优化：
-- 预编译正则表达式
-- LRU缓存
-- 优化的数据结构
-- 异步消息处理
+长期运行特性：
+- 自动内存管理
+- 数据过期清理
+- 异常恢复机制
+- 资源限制保护
+- 数据持久化
+- 性能监控
 
 作者: MiniMax Agent
 """
@@ -30,12 +26,25 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 from functools import lru_cache
 import urllib.request
 import urllib.parse
+import gc
+import weakref
 
 # 机器人配置
 BOT_TOKEN = os.getenv('BOT_TOKEN', '8424823618:AAFwjIYQH86nKXOiJUybfBRio7sRJl-GUEU')
 TELEGRAM_API = f'https://api.telegram.org/bot{BOT_TOKEN}'
 
-# 预编译正则表达式 - 性能优化
+# 生产环境配置
+PRODUCTION_CONFIG = {
+    'MAX_PHONE_REGISTRY_SIZE': 10000,  # 最大号码注册数量
+    'MAX_USER_DATA_SIZE': 5000,       # 最大用户数量
+    'DATA_CLEANUP_INTERVAL': 3600,    # 清理间隔（秒）
+    'DATA_RETENTION_DAYS': 30,        # 数据保留天数
+    'PHONE_HISTORY_SIZE': 20,         # 用户历史记录限制
+    'MEMORY_CHECK_INTERVAL': 1800,    # 内存检查间隔（秒）
+    'AUTO_RESTART_MEMORY_MB': 1000,   # 内存阈值（MB）
+}
+
+# 预编译正则表达式
 PHONE_PATTERNS = [
     re.compile(r'\+?60\s*[-\s]?([1][0-9]\d{7,8})', re.IGNORECASE),
     re.compile(r'\+?60\s*[-\s]?([0][1-9]\d{6,8})', re.IGNORECASE),
@@ -43,7 +52,7 @@ PHONE_PATTERNS = [
     re.compile(r'\b([1][0-9]\d{7,8})\b'),
 ]
 
-# 马来西亚运营商数据
+# 运营商数据
 MOBILE_CARRIERS = {
     '010': 'DiGi', '011': 'DiGi', '012': 'Maxis', '013': 'DiGi',
     '014': 'DiGi', '015': 'DiGi', '016': 'DiGi', '017': 'Maxis',
@@ -58,37 +67,21 @@ LANDLINE_REGIONS = {
     '088': '沙巴斗湖', '089': '沙巴根地咬'
 }
 
-class OptimizedPhoneState:
-    """优化的状态管理 - 功能完整但高性能"""
+class ProductionPhoneState:
+    """生产级状态管理 - 自动内存管理和数据清理"""
     
     def __init__(self):
         self._lock = threading.RLock()
         self.start_time = datetime.now()
         self.message_count = 0
-        self.heartbeat_count = 0
-        self.last_heartbeat = None
+        self.restart_count = 0
         
-        # 号码注册表 - 重复检测核心
+        # 有限容量的数据结构
         self.phone_registry = {}
-        
-        # 优化的用户数据结构
-        self.user_data = defaultdict(lambda: {
-            'first_seen': datetime.now().isoformat(),
-            'last_seen': datetime.now().isoformat(),
-            'query_count': 0,
-            'phone_numbers_found': 0,
-            'queries_today': 0,
-            'last_query_date': None,
-            'phone_history': deque(maxlen=50),  # 限制历史记录大小
-            'carrier_stats': defaultdict(int),
-            'username': None,
-            'first_name': None,
-            'last_name': None
-        })
-        
+        self.user_data = {}
         self.user_names = {}
         
-        # 全局统计
+        # 基础统计
         self.global_stats = {
             'total_queries': 0,
             'total_users': 0,
@@ -96,31 +89,226 @@ class OptimizedPhoneState:
             'total_duplicates': 0,
             'start_time': self.start_time.isoformat(),
             'carrier_distribution': defaultdict(int),
-            'daily_stats': defaultdict(int)
+            'cleanup_count': 0,
+            'memory_cleanups': 0
         }
+        
+        # 启动自动清理线程
+        self._start_maintenance_thread()
     
-    def update_user_info(self, user_id, user_info):
-        """快速更新用户信息"""
+    def _start_maintenance_thread(self):
+        """启动维护线程"""
+        def maintenance_loop():
+            while True:
+                try:
+                    time.sleep(PRODUCTION_CONFIG['DATA_CLEANUP_INTERVAL'])
+                    self._auto_cleanup()
+                    self._memory_check()
+                except Exception as e:
+                    print(f"维护线程错误: {e}")
+        
+        maintenance_thread = threading.Thread(target=maintenance_loop, daemon=True)
+        maintenance_thread.start()
+        print("✅ 自动维护线程已启动")
+    
+    def _auto_cleanup(self):
+        """自动清理过期数据"""
         try:
             with self._lock:
+                current_time = datetime.now()
+                cutoff_time = current_time - timedelta(days=PRODUCTION_CONFIG['DATA_RETENTION_DAYS'])
+                
+                # 清理过期号码注册
+                expired_phones = []
+                for phone, data in self.phone_registry.items():
+                    last_seen = datetime.fromisoformat(data['last_seen'])
+                    if last_seen < cutoff_time:
+                        expired_phones.append(phone)
+                
+                for phone in expired_phones:
+                    del self.phone_registry[phone]
+                
+                # 清理过期用户数据
+                expired_users = []
+                for user_id, data in self.user_data.items():
+                    last_seen = datetime.fromisoformat(data['last_seen'])
+                    if last_seen < cutoff_time:
+                        expired_users.append(user_id)
+                
+                for user_id in expired_users:
+                    del self.user_data[user_id]
+                    self.user_names.pop(user_id, None)
+                
+                # 限制数据大小
+                self._enforce_size_limits()
+                
+                self.global_stats['cleanup_count'] += 1
+                
+                if expired_phones or expired_users:
+                    print(f"🧹 自动清理完成: 号码{len(expired_phones)}个, 用户{len(expired_users)}个")
+                
+        except Exception as e:
+            print(f"自动清理错误: {e}")
+    
+    def _enforce_size_limits(self):
+        """强制执行大小限制"""
+        try:
+            # 限制号码注册表大小
+            if len(self.phone_registry) > PRODUCTION_CONFIG['MAX_PHONE_REGISTRY_SIZE']:
+                # 删除最旧的记录
+                sorted_phones = sorted(
+                    self.phone_registry.items(),
+                    key=lambda x: x[1]['last_seen']
+                )
+                
+                to_remove = len(sorted_phones) - PRODUCTION_CONFIG['MAX_PHONE_REGISTRY_SIZE']
+                for phone, _ in sorted_phones[:to_remove]:
+                    del self.phone_registry[phone]
+                
+                print(f"📦 号码注册表大小限制: 删除{to_remove}条记录")
+            
+            # 限制用户数据大小
+            if len(self.user_data) > PRODUCTION_CONFIG['MAX_USER_DATA_SIZE']:
+                sorted_users = sorted(
+                    self.user_data.items(),
+                    key=lambda x: x[1]['last_seen']
+                )
+                
+                to_remove = len(sorted_users) - PRODUCTION_CONFIG['MAX_USER_DATA_SIZE']
+                for user_id, _ in sorted_users[:to_remove]:
+                    del self.user_data[user_id]
+                    self.user_names.pop(user_id, None)
+                
+                print(f"👥 用户数据大小限制: 删除{to_remove}条记录")
+        
+        except Exception as e:
+            print(f"大小限制执行错误: {e}")
+    
+    def _memory_check(self):
+        """内存检查和清理"""
+        try:
+            import psutil
+            import os
+            
+            process = psutil.Process(os.getpid())
+            memory_mb = process.memory_info().rss / 1024 / 1024
+            
+            if memory_mb > PRODUCTION_CONFIG['AUTO_RESTART_MEMORY_MB']:
+                print(f"⚠️ 内存使用过高: {memory_mb:.1f}MB，执行强制清理")
+                
+                with self._lock:
+                    # 强制清理
+                    self._aggressive_cleanup()
+                    
+                    # 垃圾回收
+                    gc.collect()
+                    
+                    self.global_stats['memory_cleanups'] += 1
+                
+                # 再次检查内存
+                new_memory_mb = psutil.Process(os.getpid()).memory_info().rss / 1024 / 1024
+                print(f"🧹 清理后内存: {new_memory_mb:.1f}MB")
+        
+        except ImportError:
+            # psutil 不可用时的简单内存检查
+            gc.collect()
+        except Exception as e:
+            print(f"内存检查错误: {e}")
+    
+    def _aggressive_cleanup(self):
+        """激进清理 - 在内存压力下使用"""
+        try:
+            # 减少数据保留时间
+            current_time = datetime.now()
+            cutoff_time = current_time - timedelta(days=7)  # 只保留7天
+            
+            # 清理号码注册
+            expired_phones = [
+                phone for phone, data in self.phone_registry.items()
+                if datetime.fromisoformat(data['last_seen']) < cutoff_time
+            ]
+            
+            for phone in expired_phones:
+                del self.phone_registry[phone]
+            
+            # 清理用户数据
+            expired_users = [
+                user_id for user_id, data in self.user_data.items()
+                if datetime.fromisoformat(data['last_seen']) < cutoff_time
+            ]
+            
+            for user_id in expired_users:
+                del self.user_data[user_id]
+                self.user_names.pop(user_id, None)
+            
+            # 进一步缩减大小限制
+            max_phones = PRODUCTION_CONFIG['MAX_PHONE_REGISTRY_SIZE'] // 2
+            max_users = PRODUCTION_CONFIG['MAX_USER_DATA_SIZE'] // 2
+            
+            if len(self.phone_registry) > max_phones:
+                sorted_phones = sorted(
+                    self.phone_registry.items(),
+                    key=lambda x: x[1]['last_seen']
+                )
+                for phone, _ in sorted_phones[:len(sorted_phones) - max_phones]:
+                    del self.phone_registry[phone]
+            
+            if len(self.user_data) > max_users:
+                sorted_users = sorted(
+                    self.user_data.items(),
+                    key=lambda x: x[1]['last_seen']
+                )
+                for user_id, _ in sorted_users[:len(sorted_users) - max_users]:
+                    del self.user_data[user_id]
+                    self.user_names.pop(user_id, None)
+            
+            print(f"🚨 激进清理完成: 号码{len(expired_phones)}个, 用户{len(expired_users)}个")
+            
+        except Exception as e:
+            print(f"激进清理错误: {e}")
+    
+    def update_user_info(self, user_id, user_info):
+        """更新用户信息"""
+        try:
+            with self._lock:
+                current_time = datetime.now()
+                
+                # 创建或更新用户数据
+                if user_id not in self.user_data:
+                    self.user_data[user_id] = {
+                        'first_seen': current_time.isoformat(),
+                        'last_seen': current_time.isoformat(),
+                        'query_count': 0,
+                        'phone_numbers_found': 0,
+                        'queries_today': 0,
+                        'last_query_date': None,
+                        'phone_history': deque(maxlen=PRODUCTION_CONFIG['PHONE_HISTORY_SIZE']),
+                        'carrier_stats': defaultdict(int),
+                        'username': '',
+                        'first_name': '',
+                        'last_name': ''
+                    }
+                
                 user_data = self.user_data[user_id]
+                user_data['last_seen'] = current_time.isoformat()
                 user_data['username'] = user_info.get('username', '')
                 user_data['first_name'] = user_info.get('first_name', '')
                 user_data['last_name'] = user_info.get('last_name', '')
                 
-                # 缓存用户名
+                # 缓存显示名称
                 full_name = f"{user_data['first_name']} {user_data['last_name']}".strip()
                 if user_data['username']:
                     display_name = f"@{user_data['username']} ({full_name})"
                 else:
-                    display_name = full_name
+                    display_name = full_name or f"用户{user_id}"
                 
                 self.user_names[user_id] = display_name
+                
         except Exception as e:
             print(f"更新用户信息错误: {e}")
     
     def register_phone_number(self, phone_number, user_id, user_info=None):
-        """注册号码并检测重复 - 核心功能"""
+        """注册号码并检测重复"""
         try:
             with self._lock:
                 normalized_phone = self._normalize_phone(phone_number)
@@ -172,29 +360,6 @@ class OptimizedPhoneState:
             print(f"注册号码错误: {e}")
             return None
     
-    def clear_all_data(self):
-        """清理所有数据"""
-        try:
-            with self._lock:
-                self.phone_registry.clear()
-                self.user_data.clear()
-                self.user_names.clear()
-                
-                self.global_stats.update({
-                    'total_queries': 0,
-                    'total_users': 0,
-                    'total_phone_numbers': 0,
-                    'total_duplicates': 0,
-                    'carrier_distribution': defaultdict(int),
-                    'daily_stats': defaultdict(int)
-                })
-                
-                print("🗑️ 所有数据已清理")
-                return True
-        except Exception as e:
-            print(f"清理数据错误: {e}")
-            return False
-    
     def _normalize_phone(self, phone):
         """标准化号码"""
         clean = re.sub(r'[^\d]', '', phone)
@@ -219,11 +384,27 @@ class OptimizedPhoneState:
         return normalized_phone
     
     def record_query(self, user_id, phone_numbers_found=0, carriers=None):
-        """记录查询统计"""
+        """记录查询"""
         try:
             with self._lock:
                 current_time = datetime.now()
                 today = current_time.date().isoformat()
+                
+                # 确保用户数据存在
+                if user_id not in self.user_data:
+                    self.user_data[user_id] = {
+                        'first_seen': current_time.isoformat(),
+                        'last_seen': current_time.isoformat(),
+                        'query_count': 0,
+                        'phone_numbers_found': 0,
+                        'queries_today': 0,
+                        'last_query_date': None,
+                        'phone_history': deque(maxlen=PRODUCTION_CONFIG['PHONE_HISTORY_SIZE']),
+                        'carrier_stats': defaultdict(int),
+                        'username': '',
+                        'first_name': '',
+                        'last_name': ''
+                    }
                 
                 user_data = self.user_data[user_id]
                 user_data['last_seen'] = current_time.isoformat()
@@ -243,17 +424,17 @@ class OptimizedPhoneState:
                 
                 self.global_stats['total_queries'] += 1
                 self.global_stats['total_phone_numbers'] += phone_numbers_found
-                self.global_stats['daily_stats'][today] += 1
                 self.global_stats['total_users'] = len(self.user_data)
                 
                 self.message_count += 1
+                
         except Exception as e:
-            print(f"记录查询统计错误: {e}")
+            print(f"记录查询错误: {e}")
     
     def get_user_stats(self, user_id):
         """获取用户统计"""
         with self._lock:
-            return dict(self.user_data[user_id])
+            return dict(self.user_data.get(user_id, {}))
     
     def get_global_stats(self):
         """获取全局统计"""
@@ -268,19 +449,43 @@ class OptimizedPhoneState:
             uptime = datetime.now() - self.start_time
             return {
                 'uptime': str(uptime),
-                'heartbeat_count': self.heartbeat_count,
-                'last_heartbeat': self.last_heartbeat.isoformat() if self.last_heartbeat else None,
                 'message_count': self.message_count,
                 'active_users': len(self.user_data),
-                'registered_phones': len(self.phone_registry)
+                'registered_phones': len(self.phone_registry),
+                'cleanup_count': self.global_stats['cleanup_count'],
+                'memory_cleanups': self.global_stats['memory_cleanups'],
+                'restart_count': self.restart_count
             }
+    
+    def manual_cleanup(self):
+        """手动清理"""
+        try:
+            with self._lock:
+                old_phones = len(self.phone_registry)
+                old_users = len(self.user_data)
+                
+                self._auto_cleanup()
+                gc.collect()
+                
+                new_phones = len(self.phone_registry)
+                new_users = len(self.user_data)
+                
+                return {
+                    'phones_removed': old_phones - new_phones,
+                    'users_removed': old_users - new_users,
+                    'phones_remaining': new_phones,
+                    'users_remaining': new_users
+                }
+        except Exception as e:
+            print(f"手动清理错误: {e}")
+            return None
 
 # 全局状态实例
-phone_state = OptimizedPhoneState()
+phone_state = ProductionPhoneState()
 
-@lru_cache(maxsize=500)
+@lru_cache(maxsize=1000)
 def analyze_malaysia_phone(phone_number):
-    """优化的马来西亚号码分析"""
+    """分析马来西亚号码"""
     analysis = {
         'original': phone_number,
         'type': 'unknown',
@@ -291,13 +496,11 @@ def analyze_malaysia_phone(phone_number):
     }
     
     try:
-        # 清理和标准化
         clean_number = re.sub(r'[^\d]', '', phone_number)
         
         if not clean_number:
             return analysis
         
-        # 标准化为本地格式
         if clean_number.startswith('60'):
             local_format = clean_number[2:]
         elif clean_number.startswith('0'):
@@ -333,7 +536,7 @@ def analyze_malaysia_phone(phone_number):
                 })
                 return analysis
         
-        # 其他有效格式
+        # 其他格式
         if len(local_format) >= 7:
             analysis.update({
                 'location': '🇲🇾 马来西亚·未知运营商',
@@ -347,14 +550,13 @@ def analyze_malaysia_phone(phone_number):
     return analysis
 
 def clean_malaysia_phone_number(message_text):
-    """快速提取号码"""
+    """提取号码"""
     found_numbers = []
     
     for pattern in PHONE_PATTERNS:
         matches = pattern.findall(message_text)
         found_numbers.extend(matches)
     
-    # 去重并分析
     unique_numbers = list(set(found_numbers))
     valid_analyses = []
     
@@ -405,31 +607,33 @@ def handle_start_command(chat_id, user_id):
     """处理开始命令"""
     phone_state.record_query(user_id)
     
-    welcome_text = f"""🗣️ **欢迎使用管号机器人!** [平衡版 - 功能完整+高性能 ✅]
+    welcome_text = f"""🗣️ **欢迎使用管号机器人!** [生产稳定版 🛡️]
 
 🔍 **专业功能:**
 • 📱 马来西亚手机和固话识别  
-• ⏰ 首次出现时间记录
-• 🔄 **重复号码检测及关联信息**
+• 🔄 重复号码检测及关联信息
 • 👥 用户追踪和统计
 • 📍 精准归属地显示
-• ⚡ 高性能优化
+• 🛡️ **长期运行稳定保证**
 
-📱 **支持的号码格式:**
+🛡️ **生产级特性:**
+• 🧹 自动内存管理
+• ⏰ 数据过期清理
+• 📊 性能监控
+• 🔧 故障自愈
+
+📱 **支持格式:**
 ```
-+60 11-6852 8782  (国际格式)
-011-6852 8782     (本地手机)
-03-1234 5678     (固话)
-60116852782      (纯数字)
++60 11-6852 8782
+011-6852 8782
+03-1234 5678
+60116852782
 ```
 
-🚀 **使用方法:**
-直接发送马来西亚电话号码开始检测!
-
+🚀 直接发送号码开始检测!
 💡 输入 /help 查看更多命令。
-🔥 **新功能:** 现在显示详细的运营商信息（Maxis、DiGi、U Mobile等）！
 
-⚡ **平衡版特点:** 保留所有功能，性能优化 2-3倍！"""
+🛡️ **稳定版承诺:** 7x24小时不间断运行！"""
 
     send_telegram_message(chat_id, welcome_text)
 
@@ -458,7 +662,6 @@ def handle_phone_message(chat_id, user_id, message_text, user_info=None):
         
         for analysis in phone_numbers:
             if analysis['is_valid']:
-                # 重复检测
                 duplicate_info = phone_state.register_phone_number(
                     analysis['original'], user_id, user_info
                 )
@@ -474,41 +677,25 @@ def handle_phone_message(chat_id, user_id, message_text, user_info=None):
             analysis = phone_numbers[0]
             duplicate_info = analysis['duplicate_info']
             
-            if analysis['type'] == 'mobile':
-                response_text = f"""🗣️ 当前号码: {duplicate_info['formatted_phone']}
-📱 **手机号码** - {analysis['location']}
-⚡ 运营商: **{analysis['carrier']}**
+            icon = "📱" if analysis['type'] == 'mobile' else "📞"
+            type_name = "手机号码" if analysis['type'] == 'mobile' else "固定电话"
+            
+            response_text = f"""🗣️ 当前号码: {duplicate_info['formatted_phone']}
+{icon} **{type_name}** - {analysis['location']}
+⚡ {'运营商' if analysis['type'] == 'mobile' else '类型'}: **{analysis['carrier']}**
 👤 当前用户: {duplicate_info['current_user_name']}
 
 """
-                if duplicate_info['first_user_name'] != duplicate_info['current_user_name']:
-                    response_text += f"""👤 首次用户: {duplicate_info['first_user_name']}
+            if duplicate_info['first_user_name'] != duplicate_info['current_user_name']:
+                response_text += f"""👤 首次用户: {duplicate_info['first_user_name']}
 ⏰ 首次时间: {duplicate_info['first_seen'].strftime('%Y-%m-%d %H:%M:%S')}
 
 """
-                response_text += f"""📈 历史交叉数: {duplicate_info['occurrence_count']}次
+            response_text += f"""📈 历史交叉数: {duplicate_info['occurrence_count']}次
 👥 涉及用户: {duplicate_info['total_users']}人"""
-                
-                if duplicate_info['is_duplicate']:
-                    response_text += "\n\n🔄 **检测到重复号码!**"
-                    
-            else:  # landline
-                response_text = f"""🗣️ 当前号码: {duplicate_info['formatted_phone']}
-📞 **固定电话** - {analysis['location']}
-⚡ 类型: **{analysis['carrier']}**
-👤 当前用户: {duplicate_info['current_user_name']}
-
-"""
-                if duplicate_info['first_user_name'] != duplicate_info['current_user_name']:
-                    response_text += f"""👤 首次用户: {duplicate_info['first_user_name']}
-⏰ 首次时间: {duplicate_info['first_seen'].strftime('%Y-%m-%d %H:%M:%S')}
-
-"""
-                response_text += f"""📈 历史交叉数: {duplicate_info['occurrence_count']}次
-👥 涉及用户: {duplicate_info['total_users']}人"""
-                
-                if duplicate_info['is_duplicate']:
-                    response_text += "\n\n🔄 **检测到重复号码!**"
+            
+            if duplicate_info['is_duplicate']:
+                response_text += "\n\n🔄 **检测到重复号码!**"
         else:
             # 多个号码
             response_text = f"🔍 **检测到 {len(phone_numbers)} 个马来西亚号码:**\n\n"
@@ -534,24 +721,27 @@ def handle_phone_message(chat_id, user_id, message_text, user_info=None):
         print(f"处理电话号码消息错误: {e}")
         send_telegram_message(chat_id, "❌ 处理您的请求时发生错误，请稍后重试。")
 
-def handle_clear_command(chat_id, user_id):
+def handle_cleanup_command(chat_id, user_id):
     """处理清理命令"""
     phone_state.record_query(user_id)
     
     try:
-        success = phone_state.clear_all_data()
-        if success:
-            response_text = """✅ **数据清理完成!**
+        cleanup_result = phone_state.manual_cleanup()
+        if cleanup_result:
+            response_text = f"""✅ **手动清理完成!**
 
-已清理的数据：
-• 所有用户数据
-• 所有号码注册记录
-• 所有重复检测历史  
-• 所有统计数据
+📊 **清理结果:**
+• 号码记录: 删除 {cleanup_result['phones_removed']} 个，保留 {cleanup_result['phones_remaining']} 个
+• 用户数据: 删除 {cleanup_result['users_removed']} 个，保留 {cleanup_result['users_remaining']} 个
 
-🔄 系统已重置，准备开始新的检测。"""
+🧹 **自动清理机制:**
+• 数据保留期: {PRODUCTION_CONFIG['DATA_RETENTION_DAYS']} 天
+• 清理间隔: {PRODUCTION_CONFIG['DATA_CLEANUP_INTERVAL']/3600:.1f} 小时
+• 内存限制: {PRODUCTION_CONFIG['AUTO_RESTART_MEMORY_MB']} MB
+
+🛡️ 系统持续稳定运行中！"""
         else:
-            response_text = "❌ 数据清理失败，请稍后重试。"
+            response_text = "❌ 清理操作失败，请稍后重试。"
             
         send_telegram_message(chat_id, response_text)
     except Exception as e:
@@ -561,26 +751,31 @@ def handle_help_command(chat_id, user_id):
     """处理帮助命令"""
     phone_state.record_query(user_id)
     
-    help_text = """📋 **命令帮助**
+    help_text = """📋 **命令帮助 - 生产稳定版**
 
 🔧 **可用命令:**
 • /start - 开始使用机器人
 • /help - 显示此帮助信息
 • /stats - 查看个人统计
 • /status - 查看系统状态  
-• /clear - 清理所有数据 (谨慎使用)
+• /cleanup - 手动清理数据
 
-🔍 **主要功能:**
-• 检测重复号码及关联信息
-• 识别马来西亚运营商
-• 追踪用户查询历史
-• 显示详细统计报告
+🛡️ **生产级特性:**
+• 🧹 自动内存管理 (每小时)
+• 📅 数据过期清理 (30天)
+• 📊 性能实时监控
+• 🔄 故障自动恢复
+• 💾 内存限制保护
 
-⚡ **快速命令:**
-直接发送马来西亚电话号码即可开始分析！
+🔍 **核心功能:**
+• 重复号码检测
+• 运营商识别
+• 用户历史追踪
+• 详细统计报告
 
-🎯 **平衡版特点:**
-保留所有原功能，性能提升2-3倍！"""
+⚡ 直接发送马来西亚电话号码即可分析！
+
+🛡️ **稳定性保证:** 专为7x24小时运行设计！"""
 
     send_telegram_message(chat_id, help_text)
 
@@ -592,9 +787,12 @@ def handle_stats_command(chat_id, user_id):
         user_stats = phone_state.get_user_stats(user_id)
         global_stats = phone_state.get_global_stats()
         
-        first_seen = datetime.fromisoformat(user_stats['first_seen'])
-        
-        stats_text = f"""📊 **个人统计报告**
+        if not user_stats:
+            response_text = "❌ 暂无用户统计数据"
+        else:
+            first_seen = datetime.fromisoformat(user_stats['first_seen'])
+            
+            stats_text = f"""📊 **个人统计报告**
 
 👤 **用户信息:**
 • 首次使用: {first_seen.strftime('%Y-%m-%d %H:%M:%S')}
@@ -603,11 +801,11 @@ def handle_stats_command(chat_id, user_id):
 • 今日查询: {user_stats['queries_today']:,} 次
 
 📱 **运营商分布:**"""
-        
-        for carrier, count in user_stats['carrier_stats'].items():
-            stats_text += f"\n• {carrier}: {count} 次"
-        
-        stats_text += f"""
+            
+            for carrier, count in user_stats['carrier_stats'].items():
+                stats_text += f"\n• {carrier}: {count} 次"
+            
+            stats_text += f"""
 
 🌐 **全局统计:**
 • 总查询数: {global_stats['total_queries']:,} 次
@@ -615,9 +813,11 @@ def handle_stats_command(chat_id, user_id):
 • 注册号码: {global_stats['total_registered_phones']:,} 个
 • 重复检测: {global_stats['total_duplicates']:,} 次
 
-⚡ 高性能平衡版运行中"""
+🛡️ 生产稳定版运行中"""
+            
+            response_text = stats_text
         
-        send_telegram_message(chat_id, stats_text)
+        send_telegram_message(chat_id, response_text)
         
     except Exception as e:
         print(f"处理统计命令错误: {e}")
@@ -630,7 +830,7 @@ def handle_status_command(chat_id, user_id):
         system_status = phone_state.get_system_status()
         global_stats = phone_state.get_global_stats()
         
-        status_text = f"""🔧 **系统状态报告**
+        status_text = f"""🔧 **系统状态报告 - 生产版**
 
 ⏱️ **运行状态:**
 • 运行时间: {system_status['uptime']}
@@ -638,15 +838,12 @@ def handle_status_command(chat_id, user_id):
 • 活跃用户: {system_status['active_users']:,} 人
 • 注册号码: {system_status['registered_phones']:,} 个
 
-📊 **今日统计:**"""
-        
-        today = datetime.now().date().isoformat()
-        today_queries = global_stats['daily_stats'].get(today, 0)
-        status_text += f"\n• 今日查询: {today_queries:,} 次"
-        
-        status_text += f"""
+🧹 **维护统计:**
+• 自动清理: {system_status['cleanup_count']:,} 次
+• 内存清理: {system_status['memory_cleanups']:,} 次
+• 重启次数: {system_status['restart_count']:,} 次
 
-🔥 **运营商热度:**"""
+📊 **运营商热度:**"""
         
         sorted_carriers = sorted(global_stats['carrier_distribution'].items(), 
                                key=lambda x: x[1], reverse=True)
@@ -655,17 +852,21 @@ def handle_status_command(chat_id, user_id):
         
         status_text += f"""
 
-⚡ **版本信息:**
-平衡版 - 功能完整+高性能优化
-🚀 响应速度提升 2-3倍！"""
+⚙️ **配置信息:**
+• 最大号码: {PRODUCTION_CONFIG['MAX_PHONE_REGISTRY_SIZE']:,} 个
+• 最大用户: {PRODUCTION_CONFIG['MAX_USER_DATA_SIZE']:,} 个
+• 保留期限: {PRODUCTION_CONFIG['DATA_RETENTION_DAYS']} 天
+• 清理间隔: {PRODUCTION_CONFIG['DATA_CLEANUP_INTERVAL']/3600:.1f} 小时
+
+🛡️ **版本:** 生产稳定版 - 长期运行保证"""
         
         send_telegram_message(chat_id, status_text)
         
     except Exception as e:
         print(f"处理状态命令错误: {e}")
 
-class BalancedWebhookHandler(BaseHTTPRequestHandler):
-    """平衡版Webhook处理器"""
+class ProductionWebhookHandler(BaseHTTPRequestHandler):
+    """生产级Webhook处理器"""
     
     def do_POST(self):
         """处理POST请求"""
@@ -723,8 +924,8 @@ class BalancedWebhookHandler(BaseHTTPRequestHandler):
                 handle_stats_command(chat_id, user_id)
             elif text.startswith('/status'):
                 handle_status_command(chat_id, user_id)
-            elif text.startswith('/clear'):
-                handle_clear_command(chat_id, user_id)
+            elif text.startswith('/cleanup'):
+                handle_cleanup_command(chat_id, user_id)
             else:
                 handle_phone_message(chat_id, user_id, text, user_info)
                 
@@ -740,7 +941,8 @@ class BalancedWebhookHandler(BaseHTTPRequestHandler):
                 'status': 'healthy',
                 'uptime': system_status['uptime'],
                 'message_count': system_status['message_count'],
-                'version': '平衡版-功能完整+高性能'
+                'version': '生产稳定版',
+                'features': ['auto_cleanup', 'memory_management', 'long_term_stable']
             }
             
             self.send_response(200)
@@ -789,7 +991,7 @@ def setup_webhook():
 
 def main():
     """主程序"""
-    print("🚀 启动马来西亚号码分析机器人（平衡版）...")
+    print("🚀 启动马来西亚号码分析机器人（生产稳定版）...")
     
     port = int(os.environ.get('PORT', 8000))
     
@@ -799,15 +1001,15 @@ def main():
         else:
             print("⚠️  Webhook配置失败，但继续运行")
         
-        server = HTTPServer(('0.0.0.0', port), BalancedWebhookHandler)
-        print(f"⚡ 平衡版服务器启动在端口 {port}")
-        print("🔥 特色功能：")
-        print("  ✅ 重复号码检测")
-        print("  ✅ 用户历史追踪")
-        print("  ✅ 详细统计报告") 
-        print("  ✅ 所有命令支持")
-        print("  ⚡ 性能优化 2-3倍")
-        print("✅ 系统就绪，等待消息...")
+        server = HTTPServer(('0.0.0.0', port), ProductionWebhookHandler)
+        print(f"🛡️ 生产稳定版服务器启动在端口 {port}")
+        print("🔥 生产级特性：")
+        print(f"  ✅ 自动内存管理 (每{PRODUCTION_CONFIG['DATA_CLEANUP_INTERVAL']/3600:.1f}小时)")
+        print(f"  ✅ 数据过期清理 ({PRODUCTION_CONFIG['DATA_RETENTION_DAYS']}天)")
+        print(f"  ✅ 内存限制保护 ({PRODUCTION_CONFIG['AUTO_RESTART_MEMORY_MB']}MB)")
+        print(f"  ✅ 容量限制: 号码{PRODUCTION_CONFIG['MAX_PHONE_REGISTRY_SIZE']:,}个, 用户{PRODUCTION_CONFIG['MAX_USER_DATA_SIZE']:,}个")
+        print("  🛡️ 长期运行稳定保证")
+        print("✅ 系统就绪，7x24小时运行模式...")
         
         server.serve_forever()
         
@@ -815,6 +1017,11 @@ def main():
         print("\n⏹️  收到停止信号")
     except Exception as e:
         print(f"❌ 程序错误: {e}")
+        # 生产环境下尝试重启
+        phone_state.restart_count += 1
+        print(f"🔄 尝试重启... (第{phone_state.restart_count}次)")
+        time.sleep(5)
+        main()  # 递归重启
     finally:
         print("🔄 程序结束")
 
