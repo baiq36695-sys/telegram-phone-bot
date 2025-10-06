@@ -1,0 +1,15 @@
+[tool.poetry]
+name = "telegram-phone-bot"
+version = "17.0.0"
+description = "Malaysia Phone Number Bot Ultimate Edition"
+authors = ["MiniMax Agent"]
+
+[tool.poetry.dependencies]
+python = "^3.10"
+flask = "^2.3.3"
+python-telegram-bot = "^20.5"
+requests = "^2.31.0"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
