@@ -63,6 +63,8 @@ MALAYSIA_MOBILE_PREFIXES = {
     '020': 'Electcoms'
 }
 
+# 此处先占位，稍后初始化 PHONE_PREFIX_TO_REGION
+
 # 马来西亚固话区号和归属地 - 2025修正版
 MALAYSIA_LANDLINE_CODES = {
     '03': '雪兰莪/吉隆坡/布城',
@@ -81,6 +83,10 @@ MALAYSIA_LANDLINE_CODES = {
     '088': '沙巴斗湖',
     '089': '沙巴根地咬'
 }
+
+# 为了向后兼容，添加完整的前缀映射
+PHONE_PREFIX_TO_REGION = MALAYSIA_MOBILE_PREFIXES.copy()
+PHONE_PREFIX_TO_REGION.update(MALAYSIA_LANDLINE_CODES)
 
 class PhoneNumberState:
     """线程安全的电话号码状态管理"""
@@ -351,6 +357,36 @@ def clean_malaysia_phone_number(text):
     except Exception as e:
         logger.error(f"提取电话号码错误: {e}")
         return []
+
+def parse_phone_number(phone_number):
+    """解析电话号码 - 为了测试兼容性"""
+    analysis = analyze_malaysia_phone(phone_number)
+    if analysis['is_valid']:
+        prefix = None
+        clean_number = re.sub(r'[^\d]', '', phone_number)
+        
+        if clean_number.startswith('60'):
+            local_number = clean_number[2:]
+        elif clean_number.startswith('0'):
+            local_number = clean_number[1:]
+        else:
+            local_number = clean_number
+        
+        if len(local_number) >= 3:
+            prefix = local_number[:3]
+            if prefix not in MALAYSIA_MOBILE_PREFIXES and len(local_number) >= 2:
+                prefix = local_number[:2]
+            # 确保前缀以0开头（马来西亚格式）
+            if not prefix.startswith('0'):
+                prefix = '0' + prefix
+        
+        return {
+            'prefix': prefix,
+            'carrier': analysis['carrier'],
+            'location': analysis['location'],
+            'is_valid': analysis['is_valid']
+        }
+    return None
 
 def analyze_malaysia_phone(phone_number):
     """分析马来西亚电话号码"""
@@ -879,9 +915,11 @@ def stats():
 # 自动重启机制
 class AutoRestarter:
     """自动重启管理器"""
-    def __init__(self):
+    def __init__(self, command=None, max_restarts_per_hour=5):
+        self.command = command or ['python'] + sys.argv
         self.restart_count = 0
-        self.max_restarts = 5
+        self.max_restarts = max_restarts_per_hour
+        self.max_restarts_per_hour = max_restarts_per_hour  # 为了向后兼容
         self.last_restart = None
         
     def should_restart(self, error):
