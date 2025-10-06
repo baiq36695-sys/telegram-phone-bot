@@ -22,27 +22,55 @@ from functools import lru_cache
 from http.server import BaseHTTPRequestHandler, HTTPServer
 import os
 import gc
+import signal
+import sys
+import logging
+from contextlib import contextmanager
 
-# 生产环境配置
+# 生产环境配置（长期运行优化）
 PRODUCTION_CONFIG = {
-    'MAX_PHONE_REGISTRY_SIZE': 10000,  # 最大电话号码记录数
-    'MAX_USER_DATA_SIZE': 5000,       # 最大用户数据记录数
-    'DATA_CLEANUP_INTERVAL': 3600,    # 数据清理间隔（秒）
-    'DATA_RETENTION_DAYS': 30,        # 数据保留天数
-    'AUTO_RESTART_MEMORY_MB': 1000,   # 内存使用超过此值时自动重启
+    'MAX_PHONE_REGISTRY_SIZE': 5000,   # 最大电话号码记录数（降低以节省内存）
+    'MAX_USER_DATA_SIZE': 2000,       # 最大用户数据记录数（降低以节省内存）
+    'DATA_CLEANUP_INTERVAL': 1800,    # 数据清理间隔（30分钟，更频繁清理）
+    'DATA_RETENTION_DAYS': 7,         # 数据保留天数（降低以减少内存压力）
+    'AUTO_RESTART_MEMORY_MB': 400,    # 内存使用超过此值时自动重启（适合免费云服务）
     'MAX_MESSAGE_LENGTH': 4096,       # Telegram消息最大长度
-    'REQUEST_TIMEOUT': 30,            # HTTP请求超时时间
+    'REQUEST_TIMEOUT': 15,            # HTTP请求超时时间（降低避免长时间阻塞）
+    'MAX_CONCURRENT_REQUESTS': 10,    # 最大并发请求数
+    'HEALTH_CHECK_INTERVAL': 300,     # 健康检查间隔（5分钟）
+    'ERROR_RETRY_MAX': 3,             # 最大重试次数
+    'GRACEFUL_SHUTDOWN_TIMEOUT': 30,  # 优雅停机超时时间
 }
 
 # 从环境变量获取配置
 BOT_TOKEN = os.getenv('BOT_TOKEN', '8424823618:AAFwjIYQH86nKXOiJUybfBRio7sRJl-GUEU')
 WEBHOOK_URL = os.getenv('WEBHOOK_URL', '')
 
+# 配置日志系统
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.StreamHandler(sys.stdout)
+    ]
+)
+logger = logging.getLogger(__name__)
+
 # 线程安全的数据存储
 data_lock = threading.RLock()
 phone_registry = {}  # 电话号码注册表
 user_data = defaultdict(dict)  # 用户数据
 admin_users = set()  # 管理员用户
+
+# 全局状态管理
+app_state = {
+    'running': True,
+    'last_cleanup': datetime.now(),
+    'last_health_check': datetime.now(),
+    'error_count': 0,
+    'request_count': 0,
+    'start_time': datetime.now()
+}
 
 # 预编译正则表达式（性能优化，支持更灵活的格式）
 PHONE_PATTERNS = {
@@ -62,14 +90,19 @@ PHONE_PATTERNS = {
     'premium': re.compile(r'^(600)\d{7}$')
 }
 
-# 智能提取电话号码的正则表达式
+# 智能提取电话号码的正则表达式（优化版，减少重复提取）
 PHONE_EXTRACTION_PATTERNS = [
-    # 国际格式：+60 xx-xxxx xxxx 或 +60 xxxxxxxxx
-    re.compile(r'(\+?60\s?[\d\s\-\(\)]{8,12})'),
-    # 本地格式：0xx-xxxxxxx 或 0xxxxxxxxx
-    re.compile(r'(0[\d\s\-\(\)]{8,11})'),
-    # 纯数字格式：10-11位数字
-    re.compile(r'(\d{10,11})'),
+    # 国际格式：+60 开头的完整号码
+    re.compile(r'\+60[\s\-]?(\d[\d\s\-\(\)]{8,11})'),
+    # 手机号码：0xx-xxxxxxx 或 0xxxxxxxxx (10位)
+    re.compile(r'\b(0\d{2}[\s\-]?\d{3,4}[\s\-]?\d{3,4})\b'),
+    # 固定电话：03-xxxxxxxx (吉隆坡/雪兰莪 - 10位)
+    re.compile(r'\b(03[\s\-]?\d{4}[\s\-]?\d{4})\b'),
+    # 固定电话：其他地区 04,05,06,07,09 (9位)
+    re.compile(r'\b(0[4567][\s\-]?\d{3}[\s\-]?\d{4})\b'),
+    re.compile(r'\b(09[\s\-]?\d{3}[\s\-]?\d{4})\b'),
+    # 沙巴砂拉越固定电话：088,089,082-087 (9位)
+    re.compile(r'\b(08[2-9][\s\-]?\d{3}[\s\-]?\d{3})\b'),
     # 带括号格式：(0xx) xxx-xxxx
     re.compile(r'\(?(0\d{2,3})\)?[\s\-]?(\d{3,4})[\s\-]?(\d{3,4})')
 ]
@@ -171,24 +204,94 @@ def cleanup_old_data():
         
         print(f"数据清理完成 - 电话记录: {len(phone_registry)}, 用户数据: {len(user_data)}")
 
+def signal_handler(signum, frame):
+    """优雅停机信号处理"""
+    logger.info(f"接收到信号 {signum}，开始优雅停机...")
+    app_state['running'] = False
+
 def data_cleanup_worker():
-    """数据清理工作线程"""
-    while True:
+    """数据清理工作线程（长期运行优化）"""
+    logger.info("数据清理工作线程已启动")
+    
+    while app_state['running']:
         try:
             time.sleep(PRODUCTION_CONFIG['DATA_CLEANUP_INTERVAL'])
+            
+            if not app_state['running']:
+                break
+                
             cleanup_old_data()
+            app_state['last_cleanup'] = datetime.now()
             
             # 检查内存使用（估算）
             memory_mb = get_memory_usage_estimate()
             if memory_mb > PRODUCTION_CONFIG['AUTO_RESTART_MEMORY_MB']:
-                print(f"内存使用估算过高 ({memory_mb:.1f}MB)，建议重启服务")
+                logger.warning(f"内存使用过高 ({memory_mb:.1f}MB)，触发数据清理")
+                # 强制清理更多数据
+                force_cleanup()
+                
+            # 定期健康检查
+            perform_health_check()
                 
         except Exception as e:
-            print(f"数据清理错误: {e}")
+            logger.error(f"数据清理工作线程错误: {e}")
+            app_state['error_count'] += 1
+            
+            # 如果错误过多，暂停一段时间
+            if app_state['error_count'] > 10:
+                logger.warning("错误过多，暂停数据清理60秒")
+                time.sleep(60)
+                app_state['error_count'] = 0
+    
+    logger.info("数据清理工作线程已停止")
+
+def force_cleanup():
+    """强制清理更多数据以释放内存"""
+    with data_lock:
+        # 更激进的清理策略
+        if len(phone_registry) > PRODUCTION_CONFIG['MAX_PHONE_REGISTRY_SIZE'] // 2:
+            # 删除一半最老的记录
+            sorted_phones = sorted(phone_registry.items(), 
+                                 key=lambda x: x[1].get('timestamp', '1970-01-01'))
+            remove_count = len(phone_registry) // 2
+            for phone, _ in sorted_phones[:remove_count]:
+                del phone_registry[phone]
+            
+            logger.info(f"强制清理：删除了 {remove_count} 个电话记录")
+        
+        # 强制垃圾回收
+        gc.collect()
+
+def perform_health_check():
+    """执行系统健康检查"""
+    try:
+        app_state['last_health_check'] = datetime.now()
+        
+        # 检查各项指标
+        memory_mb = get_memory_usage_estimate()
+        uptime = (datetime.now() - app_state['start_time']).total_seconds()
+        
+        # 记录健康状态
+        if uptime % 3600 < 60:  # 每小时记录一次
+            logger.info(f"健康检查 - 运行时间: {uptime/3600:.1f}h, 内存: {memory_mb:.1f}MB, "
+                       f"电话记录: {len(phone_registry)}, 用户: {len(user_data)}")
+        
+    except Exception as e:
+        logger.error(f"健康检查错误: {e}")
+
+@contextmanager
+def error_handler(operation_name):
+    """通用错误处理上下文管理器"""
+    try:
+        yield
+    except Exception as e:
+        logger.error(f"{operation_name} 错误: {e}")
+        app_state['error_count'] += 1
+        raise
 
 def extract_phone_numbers(text):
-    """从文本中智能提取电话号码"""
-    phone_candidates = []
+    """从文本中智能提取电话号码（优化版，避免重复）"""
+    phone_candidates = set()  # 使用集合避免重复
     
     # 使用多个正则表达式模式提取可能的电话号码
     for pattern in PHONE_EXTRACTION_PATTERNS:
@@ -196,21 +299,40 @@ def extract_phone_numbers(text):
         for match in matches:
             if isinstance(match, tuple):
                 # 处理带括号的格式
-                phone_candidates.append(''.join(match))
+                candidate = ''.join(match)
             else:
-                phone_candidates.append(match)
+                candidate = match
+            
+            # 清理号码格式
+            cleaned = re.sub(r'[\s\-\(\)]+', '', candidate)
+            
+            # 基本验证和标准化
+            if len(cleaned) >= 9 and cleaned.isdigit():
+                # 标准化为统一格式以避免重复
+                normalized = normalize_phone_format(cleaned)
+                if normalized:
+                    phone_candidates.add(normalized)
     
-    # 清理和验证提取的号码
-    valid_phones = []
-    for candidate in phone_candidates:
-        # 清理号码格式
-        cleaned = re.sub(r'[\s\-\(\)]+', '', candidate)
-        
-        # 基本长度验证
-        if len(cleaned) >= 9:
-            valid_phones.append(candidate)
+    return list(phone_candidates)
+
+def normalize_phone_format(phone):
+    """标准化电话号码格式"""
+    # 移除所有非数字字符
+    digits_only = re.sub(r'\D', '', phone)
     
-    return valid_phones
+    # 处理国际格式
+    if digits_only.startswith('60'):
+        digits_only = digits_only[2:]  # 移除国家代码
+    
+    # 确保以0开头
+    if not digits_only.startswith('0') and len(digits_only) >= 9:
+        digits_only = '0' + digits_only
+    
+    # 基本长度验证
+    if 9 <= len(digits_only) <= 11 and digits_only.startswith('0'):
+        return digits_only
+    
+    return None
 
 @lru_cache(maxsize=1000)
 def analyze_phone_number(phone):
@@ -269,7 +391,15 @@ def analyze_phone_number(phone):
                     
             elif pattern_name.startswith('landline_'):
                 result['type'] = '固定电话'
-                prefix = phone[:3] if len(phone) >= 10 else phone[:2]
+                
+                # 智能确定地区代码前缀
+                if phone.startswith('08'):
+                    # 沙巴砂拉越使用3位前缀
+                    prefix = phone[:3]
+                else:
+                    # 其他地区使用2位前缀
+                    prefix = phone[:2]
+                
                 result['state'] = STATE_MAPPING.get(prefix, '未知地区')
                 if result['state'] != '未知地区':
                     result['coverage'] = f"🇲🇾 {result['state']}"
@@ -325,8 +455,10 @@ def register_phone_number(phone, user_id, username):
         
         return f"✅ 号码注册成功"
 
-def send_telegram_message(chat_id, text):
-    """发送Telegram消息（无需第三方库）"""
+def send_telegram_message(chat_id, text, retry_count=0):
+    """发送Telegram消息（长期运行优化，带重试机制）"""
+    max_retries = PRODUCTION_CONFIG['ERROR_RETRY_MAX']
+    
     try:
         # 限制消息长度
         if len(text) > PRODUCTION_CONFIG['MAX_MESSAGE_LENGTH']:
@@ -345,29 +477,72 @@ def send_telegram_message(chat_id, text):
         # 创建请求
         req = urllib.request.Request(url, data=data_encoded, method='POST')
         req.add_header('Content-Type', 'application/x-www-form-urlencoded')
+        req.add_header('User-Agent', 'Malaysia-Phone-Bot/1.5.0')
         
         # 发送请求
         with urllib.request.urlopen(req, timeout=PRODUCTION_CONFIG['REQUEST_TIMEOUT']) as response:
             result = json.loads(response.read().decode())
-            return result.get('ok', False)
+            if result.get('ok', False):
+                return True
+            else:
+                logger.warning(f"Telegram API 错误: {result.get('description', '未知错误')}")
+                return False
             
+    except urllib.error.HTTPError as e:
+        logger.error(f"HTTP 错误 {e.code}: {e.reason}")
+        if retry_count < max_retries and e.code in [429, 502, 503, 504]:
+            # 对于特定错误码进行重试
+            wait_time = (retry_count + 1) * 2  # 指数退避
+            logger.info(f"等待 {wait_time} 秒后重试...")
+            time.sleep(wait_time)
+            return send_telegram_message(chat_id, text, retry_count + 1)
+        return False
+        
+    except urllib.error.URLError as e:
+        logger.error(f"网络错误: {e.reason}")
+        if retry_count < max_retries:
+            wait_time = (retry_count + 1) * 2
+            logger.info(f"网络重试，等待 {wait_time} 秒...")
+            time.sleep(wait_time)
+            return send_telegram_message(chat_id, text, retry_count + 1)
+        return False
+        
     except Exception as e:
-        print(f"发送消息错误: {e}")
+        logger.error(f"发送消息未知错误: {e}")
+        if retry_count < max_retries:
+            wait_time = (retry_count + 1) * 2
+            time.sleep(wait_time)
+            return send_telegram_message(chat_id, text, retry_count + 1)
         return False
 
 def handle_message(message):
-    """处理Telegram消息"""
+    """处理Telegram消息（长期运行优化）"""
+    chat_id = None
+    
     try:
-        chat_id = message['chat']['id']
-        user_id = message['from']['id']
-        username = message['from'].get('username', '未知用户')
+        # 增加请求计数
+        app_state['request_count'] += 1
+        
+        # 基本数据提取和验证
+        if not isinstance(message, dict):
+            logger.warning("收到非字典类型的消息")
+            return
+            
+        chat_id = message.get('chat', {}).get('id')
+        user_id = message.get('from', {}).get('id')
+        username = message.get('from', {}).get('username', '未知用户')
         text = message.get('text', '')
+        
+        if not chat_id or not user_id:
+            logger.warning("消息缺少必要的chat_id或user_id")
+            return
         
         # 更新用户活动时间
         with data_lock:
             if user_id not in user_data:
                 user_data[user_id] = {}
             user_data[user_id]['last_activity'] = datetime.now().isoformat()
+            user_data[user_id]['message_count'] = user_data[user_id].get('message_count', 0) + 1
         
         # 处理命令
         if text.startswith('/start'):
@@ -509,10 +684,11 @@ def handle_message(message):
                 send_telegram_message(chat_id, response)
                 return
             
-            # 分析第一个提取到的电话号码
+            # 处理提取到的电话号码 - 只处理第一个有效的
+            processed = False
             for phone_candidate in extracted_phones:
                 result = analyze_phone_number(phone_candidate)
-                if result and result['valid']:
+                if result and result['valid'] and not processed:
                     current_time = datetime.now()
                     
                     # 检查是否已注册并处理
@@ -563,7 +739,12 @@ def handle_message(message):
 ✅ <b>新录：</b>首次记录！
 """
                     send_telegram_message(chat_id, info)
-                    return
+                    processed = True
+                    break
+            
+            # 如果处理成功，直接返回
+            if processed:
+                return
             
             # 如果所有提取的号码都无效
             response = f"""
@@ -586,86 +767,234 @@ def handle_message(message):
 """
             send_telegram_message(chat_id, response)
                 
+    except KeyError as e:
+        logger.error(f"消息格式错误 - 缺少字段: {e}")
+        if chat_id:
+            send_telegram_message(chat_id, "❌ 消息格式有误，请重新发送")
+            
     except Exception as e:
-        print(f"处理消息错误: {e}")
-        try:
-            send_telegram_message(chat_id, "❌ 处理请求时发生错误，请稍后重试")
-        except:
-            pass
+        logger.error(f"处理消息错误: {e}")
+        app_state['error_count'] += 1
+        
+        if chat_id:
+            try:
+                error_msg = "❌ 服务暂时不可用，请稍后重试"
+                if app_state['error_count'] > 50:
+                    error_msg += "\n🔧 系统正在进行维护，请稍等片刻"
+                    
+                send_telegram_message(chat_id, error_msg)
+            except Exception as send_error:
+                logger.error(f"发送错误消息失败: {send_error}")
+        
+        # 如果错误太多，触发清理
+        if app_state['error_count'] > 100:
+            logger.warning("错误数量过多，执行紧急清理")
+            force_cleanup()
+            app_state['error_count'] = 0
 
 class WebhookHandler(BaseHTTPRequestHandler):
     def do_POST(self):
+        start_time = time.time()
+        
         try:
-            content_length = int(self.headers['Content-Length'])
-            post_data = self.rfile.read(content_length)
+            # 检查应用状态
+            if not app_state['running']:
+                self.send_response(503)  # Service Unavailable
+                self.send_header('Content-type', 'application/json')
+                self.end_headers()
+                self.wfile.write(b'{"ok": false, "error": "service_shutting_down"}')
+                return
             
-            # 解析Telegram更新
-            update = json.loads(post_data.decode())
+            # 限制内容长度
+            content_length = int(self.headers.get('Content-Length', 0))
+            if content_length > 10 * 1024 * 1024:  # 10MB 限制
+                self.send_response(413)  # Payload Too Large
+                self.end_headers()
+                return
             
-            if 'message' in update:
-                handle_message(update['message'])
+            if content_length > 0:
+                post_data = self.rfile.read(content_length)
+                
+                # 解析Telegram更新
+                try:
+                    update = json.loads(post_data.decode('utf-8'))
+                except json.JSONDecodeError:
+                    logger.warning("收到无效的JSON数据")
+                    self.send_response(400)
+                    self.end_headers()
+                    return
+                
+                # 处理消息
+                if 'message' in update:
+                    with error_handler("webhook_message_processing"):
+                        handle_message(update['message'])
             
             # 返回成功响应
             self.send_response(200)
             self.send_header('Content-type', 'application/json')
+            self.send_header('Cache-Control', 'no-cache')
             self.end_headers()
-            self.wfile.write(b'{"ok": true}')
+            
+            response_data = {
+                "ok": True, 
+                "timestamp": datetime.now().isoformat(),
+                "processing_time": round((time.time() - start_time) * 1000, 2)
+            }
+            self.wfile.write(json.dumps(response_data).encode())
             
         except Exception as e:
-            print(f"Webhook处理错误: {e}")
-            self.send_response(500)
-            self.end_headers()
+            logger.error(f"Webhook处理错误: {e}")
+            try:
+                self.send_response(500)
+                self.send_header('Content-type', 'application/json')
+                self.end_headers()
+                error_response = {
+                    "ok": False, 
+                    "error": "internal_server_error",
+                    "timestamp": datetime.now().isoformat()
+                }
+                self.wfile.write(json.dumps(error_response).encode())
+            except:
+                pass  # 如果连错误响应都发送不了，就忽略
     
     def do_GET(self):
-        """健康检查端点"""
+        """健康检查端点（长期运行监控）"""
         try:
             memory_mb = get_memory_usage_estimate()
+            uptime_seconds = (datetime.now() - app_state['start_time']).total_seconds()
+            
+            # 计算健康状态
+            health_status = 'healthy'
+            if not app_state['running']:
+                health_status = 'shutting_down'
+            elif memory_mb > PRODUCTION_CONFIG['AUTO_RESTART_MEMORY_MB']:
+                health_status = 'warning'
+            elif app_state['error_count'] > 20:
+                health_status = 'degraded'
+            
             status = {
-                'status': 'healthy',
-                'version': '1.3.0 Final Fixed',
+                'status': health_status,
+                'version': '1.5.0 Smart Tracking (Long-Running)',
+                'uptime_hours': round(uptime_seconds / 3600, 2),
                 'phone_registry_size': len(phone_registry),
                 'user_data_size': len(user_data),
-                'memory_estimate_mb': memory_mb,
-                'timestamp': datetime.now().isoformat()
+                'memory_estimate_mb': round(memory_mb, 2),
+                'error_count': app_state['error_count'],
+                'request_count': app_state['request_count'],
+                'last_cleanup': app_state['last_cleanup'].isoformat(),
+                'last_health_check': app_state['last_health_check'].isoformat(),
+                'timestamp': datetime.now().isoformat(),
+                'limits': {
+                    'max_phone_registry': PRODUCTION_CONFIG['MAX_PHONE_REGISTRY_SIZE'],
+                    'max_user_data': PRODUCTION_CONFIG['MAX_USER_DATA_SIZE'],
+                    'memory_threshold': PRODUCTION_CONFIG['AUTO_RESTART_MEMORY_MB']
+                }
             }
             
             response = json.dumps(status, ensure_ascii=False, indent=2)
             
-            self.send_response(200)
+            # 根据健康状态返回不同的HTTP状态码
+            if health_status == 'healthy':
+                status_code = 200
+            elif health_status in ['warning', 'degraded']:
+                status_code = 206  # Partial Content
+            else:
+                status_code = 503  # Service Unavailable
+            
+            self.send_response(status_code)
             self.send_header('Content-type', 'application/json; charset=utf-8')
+            self.send_header('Cache-Control', 'no-cache')
             self.end_headers()
             self.wfile.write(response.encode('utf-8'))
             
         except Exception as e:
-            print(f"健康检查错误: {e}")
-            self.send_response(500)
-            self.end_headers()
+            logger.error(f"健康检查错误: {e}")
+            try:
+                self.send_response(500)
+                self.send_header('Content-type', 'application/json')
+                self.end_headers()
+                error_response = {"status": "error", "message": str(e)}
+                self.wfile.write(json.dumps(error_response).encode())
+            except:
+                pass
     
     def log_message(self, format, *args):
         """减少日志输出"""
         pass
 
 def run_server():
-    """启动HTTP服务器"""
+    """启动HTTP服务器（长期运行优化）"""
     port = int(os.getenv('PORT', 10000))
+    
+    # 注册信号处理器
+    signal.signal(signal.SIGTERM, signal_handler)
+    signal.signal(signal.SIGINT, signal_handler)
+    
+    server = None
+    cleanup_thread = None
     
     try:
         server = HTTPServer(('', port), WebhookHandler)
-        print(f"马来西亚电话号码机器人已启动")
-        print(f"版本: 1.3.0 Final Fixed (智能提取版)")
-        print(f"端口: {port}")
-        print(f"内存估算: {get_memory_usage_estimate():.1f} MB")
-        print(f"时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-        print("=" * 50)
+        server.timeout = 1  # 设置超时以支持优雅停机
+        
+        logger.info("=" * 60)
+        logger.info("🚀 马来西亚电话号码机器人已启动 (长期运行版)")
+        logger.info(f"📦 版本: 1.5.0 Smart Tracking (Long-Running)")
+        logger.info(f"🌐 端口: {port}")
+        logger.info(f"💾 内存估算: {get_memory_usage_estimate():.1f} MB")
+        logger.info(f"⏰ 启动时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        logger.info(f"🔧 配置:")
+        logger.info(f"   - 数据保留: {PRODUCTION_CONFIG['DATA_RETENTION_DAYS']} 天")
+        logger.info(f"   - 清理间隔: {PRODUCTION_CONFIG['DATA_CLEANUP_INTERVAL']} 秒")
+        logger.info(f"   - 最大内存: {PRODUCTION_CONFIG['AUTO_RESTART_MEMORY_MB']} MB")
+        logger.info(f"   - 最大记录: {PRODUCTION_CONFIG['MAX_PHONE_REGISTRY_SIZE']} 个")
+        logger.info("=" * 60)
         
         # 启动数据清理线程
-        cleanup_thread = threading.Thread(target=data_cleanup_worker, daemon=True)
+        cleanup_thread = threading.Thread(target=data_cleanup_worker, daemon=False)
         cleanup_thread.start()
+        logger.info("🧹 数据清理线程已启动")
         
-        server.serve_forever()
+        # 主服务循环，支持优雅停机
+        while app_state['running']:
+            try:
+                server.handle_request()
+            except OSError:
+                # 服务器socket被关闭
+                if not app_state['running']:
+                    break
+                logger.warning("服务器socket异常，继续运行...")
+                time.sleep(0.1)
+            except Exception as e:
+                logger.error(f"服务器处理请求错误: {e}")
+                if not app_state['running']:
+                    break
+                time.sleep(0.1)
         
+        logger.info("🛑 开始优雅停机...")
+        
+    except KeyboardInterrupt:
+        logger.info("收到键盘中断信号")
     except Exception as e:
-        print(f"服务器启动错误: {e}")
+        logger.error(f"服务器启动错误: {e}")
+    finally:
+        # 优雅停机
+        if server:
+            logger.info("关闭HTTP服务器...")
+            server.server_close()
+        
+        # 等待清理线程结束
+        if cleanup_thread and cleanup_thread.is_alive():
+            logger.info("等待数据清理线程结束...")
+            cleanup_thread.join(timeout=PRODUCTION_CONFIG['GRACEFUL_SHUTDOWN_TIMEOUT'])
+        
+        # 最后的数据清理
+        logger.info("执行最终数据清理...")
+        cleanup_old_data()
+        
+        uptime = (datetime.now() - app_state['start_time']).total_seconds()
+        logger.info(f"✅ 服务器已停止 - 运行时间: {uptime/3600:.2f} 小时")
+        logger.info(f"📊 统计信息: 处理 {app_state['request_count']} 个请求, {app_state['error_count']} 个错误")
 
 if __name__ == '__main__':
     run_server()
