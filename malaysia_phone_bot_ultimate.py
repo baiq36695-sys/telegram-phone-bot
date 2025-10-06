@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-马来西亚电话号码机器人 - 生产版本（修复版）
-专为24/7稳定运行设计，包含完整功能和性能优化
-修复了号码识别问题，支持多种格式
+马来西亚电话号码机器人 - 零依赖版本
+专为Render等云平台设计，无需任何第三方库
+包含完整功能和性能优化
 
 作者: MiniMax Agent
-版本: 1.1.0 Production Fixed
+版本: 1.2.0 Zero Dependency
 更新时间: 2025-10-06
 """
 
@@ -22,7 +22,6 @@ from functools import lru_cache
 from http.server import BaseHTTPRequestHandler, HTTPServer
 import os
 import gc
-import psutil
 
 # 生产环境配置
 PRODUCTION_CONFIG = {
@@ -93,12 +92,16 @@ OPERATOR_MAPPING = {
     '019': 'Celcom'
 }
 
-# 内存管理功能
-def get_memory_usage():
-    """获取当前内存使用情况"""
+# 简化的内存管理功能（无需psutil）
+def get_memory_usage_estimate():
+    """估算内存使用情况（基于数据结构大小）"""
     try:
-        process = psutil.Process()
-        return process.memory_info().rss / 1024 / 1024  # MB
+        # 基于数据结构大小估算内存使用
+        phone_count = len(phone_registry)
+        user_count = len(user_data)
+        # 每个记录大约1KB，基础内存约50MB
+        estimated_mb = 50 + (phone_count + user_count) * 0.001
+        return estimated_mb
     except:
         return 0
 
@@ -154,10 +157,10 @@ def data_cleanup_worker():
             time.sleep(PRODUCTION_CONFIG['DATA_CLEANUP_INTERVAL'])
             cleanup_old_data()
             
-            # 检查内存使用
-            memory_mb = get_memory_usage()
+            # 检查内存使用（估算）
+            memory_mb = get_memory_usage_estimate()
             if memory_mb > PRODUCTION_CONFIG['AUTO_RESTART_MEMORY_MB']:
-                print(f"内存使用过高 ({memory_mb:.1f}MB)，建议重启服务")
+                print(f"内存使用估算过高 ({memory_mb:.1f}MB)，建议重启服务")
                 
         except Exception as e:
             print(f"数据清理错误: {e}")
@@ -323,7 +326,7 @@ def handle_message(message):
 /clear - 清除个人数据
 /help - 查看帮助
 
-<i>支持24/7稳定运行，已修复识别问题 🚀</i>
+<i>零依赖版本，部署更稳定 🚀</i>
 """
             send_telegram_message(chat_id, response)
             
@@ -364,7 +367,7 @@ def handle_message(message):
             with data_lock:
                 total_phones = len(phone_registry)
                 total_users = len(user_data)
-                memory_mb = get_memory_usage()
+                memory_mb = get_memory_usage_estimate()
                 
             response = f"""
 📊 <b>系统状态报告</b>
@@ -372,7 +375,7 @@ def handle_message(message):
 💾 <b>数据统计：</b>
 • 注册号码：{total_phones:,} 个
 • 活跃用户：{total_users:,} 人
-• 内存使用：{memory_mb:.1f} MB
+• 内存估算：{memory_mb:.1f} MB
 
 ⚡ <b>性能指标：</b>
 • 缓存命中率：高效运行
@@ -381,9 +384,10 @@ def handle_message(message):
 
 🚀 <b>运行状态：</b>
 • 服务状态：正常运行
-• 版本信息：Production 1.1.0 Fixed
+• 版本信息：Zero Dependency 1.2.0
 • 更新时间：2025-10-06
 • 识别引擎：已修复多格式支持
+• 依赖状态：零第三方依赖
 
 <i>系统运行稳定，号码识别正常 ✅</i>
 """
@@ -502,11 +506,12 @@ class WebhookHandler(BaseHTTPRequestHandler):
             
             status = {
                 'status': 'healthy',
-                'version': '1.1.0 Production Fixed',
+                'version': '1.2.0 Zero Dependency',
                 'timestamp': datetime.now().isoformat(),
-                'memory_mb': get_memory_usage(),
+                'memory_estimate_mb': get_memory_usage_estimate(),
                 'phone_count': len(phone_registry),
-                'user_count': len(user_data)
+                'user_count': len(user_data),
+                'dependencies': 'none'
             }
             
             self.wfile.write(json.dumps(status).encode())
@@ -520,13 +525,14 @@ class WebhookHandler(BaseHTTPRequestHandler):
 
 def main():
     """主函数"""
-    print("🚀 马来西亚电话号码机器人 - 生产版本启动中...")
+    print("🚀 马来西亚电话号码机器人 - 零依赖版本启动中...")
     print(f"📊 配置信息：")
     print(f"   - 最大号码记录：{PRODUCTION_CONFIG['MAX_PHONE_REGISTRY_SIZE']:,}")
     print(f"   - 最大用户记录：{PRODUCTION_CONFIG['MAX_USER_DATA_SIZE']:,}")
     print(f"   - 数据保留天数：{PRODUCTION_CONFIG['DATA_RETENTION_DAYS']}")
     print(f"   - 清理间隔：{PRODUCTION_CONFIG['DATA_CLEANUP_INTERVAL']}秒")
     print("🔧 已修复号码识别问题，支持多种格式")
+    print("⚡ 零第三方依赖，部署更稳定")
     
     # 启动数据清理工作线程
     cleanup_thread = threading.Thread(target=data_cleanup_worker, daemon=True)
