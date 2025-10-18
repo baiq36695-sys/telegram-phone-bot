@@ -6,8 +6,8 @@
 完整记录号码出现历史和用户统计
  
 作者: MiniMax Agent
-版本: 1.7.0 Smart Tracking (User Display)
-更新时间: 2025-10-06 (v1.6.0 Enhanced Duplicates)
+版本: 1.8.0 Persistent Storage (Data Preservation)
+更新时间: 2025-10-13 (v1.8.0 Enhanced Data Persistence)
 """
 
 import json
@@ -25,26 +25,35 @@ import gc
 import signal
 import sys
 import logging
+import shutil
 from contextlib import contextmanager
 
 # 生产环境配置（长期运行优化）
 PRODUCTION_CONFIG = {
-    'MAX_PHONE_REGISTRY_SIZE': 5000,   # 最大电话号码记录数
-    'MAX_USER_DATA_SIZE': 2000,       # 最大用户数据记录数
-    'DATA_CLEANUP_INTERVAL': 1800,    # 数据清理间隔（30分钟）
-    'DATA_RETENTION_DAYS': 7,         # 数据保留天数
-    'AUTO_RESTART_MEMORY_MB': 400,    # 内存使用超过此值时自动重启
+    'MAX_PHONE_REGISTRY_SIZE': 50000,  # 最大电话号码记录数（增加到5万）
+    'MAX_USER_DATA_SIZE': 10000,      # 最大用户数据记录数（增加到1万）
+    'DATA_CLEANUP_INTERVAL': 3600,    # 数据清理间隔（1小时）
+    'DATA_RETENTION_DAYS': 45,        # 数据保留天数（一个半月）
+    'AUTO_RESTART_MEMORY_MB': 800,    # 内存使用超过此值时自动重启
     'MAX_MESSAGE_LENGTH': 4096,       # Telegram消息最大长度
     'REQUEST_TIMEOUT': 15,            # HTTP请求超时时间
     'MAX_CONCURRENT_REQUESTS': 10,    # 最大并发请求数
     'HEALTH_CHECK_INTERVAL': 300,     # 健康检查间隔（5分钟）
     'ERROR_RETRY_MAX': 3,             # 最大重试次数
     'GRACEFUL_SHUTDOWN_TIMEOUT': 30,  # 优雅停机超时时间
+    'DATA_SAVE_INTERVAL': 600,        # 数据保存间隔（10分钟）
+    'BACKUP_RETENTION_DAYS': 90,      # 备份文件保留天数（3个月）
 }
 
 # 从环境变量获取配置
 BOT_TOKEN = os.getenv('BOT_TOKEN', '8424823618:AAFwjIYQH86nKXOiJUybfBRio7sRJl-GUEU')
 WEBHOOK_URL = os.getenv('WEBHOOK_URL', '')
+
+# 数据持久化文件路径
+DATA_DIR = 'data'
+PHONE_REGISTRY_FILE = os.path.join(DATA_DIR, 'phone_registry.json')
+USER_DATA_FILE = os.path.join(DATA_DIR, 'user_data.json')
+BACKUP_DIR = os.path.join(DATA_DIR, 'backups')
 
 # 配置日志系统
 logging.basicConfig(
@@ -93,13 +102,32 @@ PHONE_PATTERNS = {
 
 # 智能提取电话号码的正则表达式
 PHONE_EXTRACTION_PATTERNS = [
+    # 马来西亚国际格式
     re.compile(r'\+60[\s\-]?(\d[\d\s\-\(\)]{8,11})'),
+    
+    # 标准固定电话格式
     re.compile(r'\b(0\d{2}[\s\-]?\d{3,4}[\s\-]?\d{3,4})\b'),
+    
+    # 特定地区格式
     re.compile(r'\b(03[\s\-]?\d{4}[\s\-]?\d{4})\b'),
     re.compile(r'\b(0[4567][\s\-]?\d{3}[\s\-]?\d{4})\b'),
     re.compile(r'\b(09[\s\-]?\d{3}[\s\-]?\d{4})\b'),
     re.compile(r'\b(08[2-9][\s\-]?\d{3}[\s\-]?\d{3})\b'),
-    re.compile(r'\(?(0\d{2,3})\)?[\s\-]?(\d{3,4})[\s\-]?(\d{3,4})')
+    
+    # 带括号格式
+    re.compile(r'\(?(0\d{2,3})\)?[\s\-]?(\d{3,4})[\s\-]?(\d{3,4})'),
+    
+    # 增强的灵活格式
+    re.compile(r'\b(\d{2,3}[\s\-]\d{3,4}[\s\-]\d{3,4})\b'),  # 123-456-789
+    re.compile(r'\b(\d{2}\s+\d{4}\s+\d{3})\b'),              # 12 3456 789
+    re.compile(r'\b(\d{3}\s+\d{3}\s+\d{3,4})\b'),            # 123 456 789
+    
+    # 纯数字格式（9-11位）
+    re.compile(r'\b(\d{9,11})\b'),
+    
+    # 修正模式（不带边界）
+    re.compile(r'(\d{2}\s+\d{4}\s+\d{3})'),                  # 12 3456 789
+    re.compile(r'(0\d-\d{4}-\d{4})'),                        # 03-1234-5678
 ]
 
 STATE_MAPPING = {
@@ -150,31 +178,188 @@ def get_memory_usage_estimate():
     except:
         return 0
 
+def ensure_data_directories():
+    """确保数据目录存在"""
+    try:
+        os.makedirs(DATA_DIR, exist_ok=True)
+        os.makedirs(BACKUP_DIR, exist_ok=True)
+        logger.info(f"数据目录已创建: {DATA_DIR}")
+    except Exception as e:
+        logger.error(f"创建数据目录失败: {e}")
+
+def save_data_to_file():
+    """保存数据到文件"""
+    try:
+        with data_lock:
+            # 保存电话号码注册表
+            with open(PHONE_REGISTRY_FILE, 'w', encoding='utf-8') as f:
+                json.dump(phone_registry, f, ensure_ascii=False, indent=2)
+            
+            # 保存用户数据
+            user_data_dict = dict(user_data)  # 转换 defaultdict 为普通字典
+            with open(USER_DATA_FILE, 'w', encoding='utf-8') as f:
+                json.dump(user_data_dict, f, ensure_ascii=False, indent=2)
+            
+            logger.info(f"数据已保存 - 电话记录: {len(phone_registry)}, 用户数据: {len(user_data)}")
+            return True
+    except Exception as e:
+        logger.error(f"保存数据失败: {e}")
+        return False
+
+def load_data_from_file():
+    """从文件加载数据"""
+    try:
+        global phone_registry, user_data
+        
+        # 加载电话号码注册表
+        if os.path.exists(PHONE_REGISTRY_FILE):
+            try:
+                with open(PHONE_REGISTRY_FILE, 'r', encoding='utf-8') as f:
+                    loaded_phone_registry = json.load(f)
+                    if isinstance(loaded_phone_registry, dict):
+                        with data_lock:
+                            phone_registry.update(loaded_phone_registry)
+                        logger.info(f"已加载电话记录: {len(phone_registry)} 个")
+                    else:
+                        logger.warning("电话注册表文件格式错误，已忽略")
+            except json.JSONDecodeError as e:
+                logger.error(f"电话注册表文件JSON格式错误: {e}")
+                # 备份损坏的文件
+                backup_corrupted_file = f"{PHONE_REGISTRY_FILE}.corrupted.{int(time.time())}"
+                shutil.move(PHONE_REGISTRY_FILE, backup_corrupted_file)
+                logger.info(f"已将损坏文件移动到: {backup_corrupted_file}")
+        else:
+            logger.info("电话注册表文件不存在，从空数据开始")
+        
+        # 加载用户数据
+        if os.path.exists(USER_DATA_FILE):
+            try:
+                with open(USER_DATA_FILE, 'r', encoding='utf-8') as f:
+                    loaded_user_data = json.load(f)
+                    if isinstance(loaded_user_data, dict):
+                        with data_lock:
+                            for user_id, data in loaded_user_data.items():
+                                try:
+                                    user_data[int(user_id)] = data
+                                except (ValueError, TypeError):
+                                    logger.warning(f"跳过无效用户ID: {user_id}")
+                        logger.info(f"已加载用户数据: {len(user_data)} 个")
+                    else:
+                        logger.warning("用户数据文件格式错误，已忽略")
+            except json.JSONDecodeError as e:
+                logger.error(f"用户数据文件JSON格式错误: {e}")
+                # 备份损坏的文件
+                backup_corrupted_file = f"{USER_DATA_FILE}.corrupted.{int(time.time())}"
+                shutil.move(USER_DATA_FILE, backup_corrupted_file)
+                logger.info(f"已将损坏文件移动到: {backup_corrupted_file}")
+        else:
+            logger.info("用户数据文件不存在，从空数据开始")
+        
+        return True
+    except Exception as e:
+        logger.error(f"加载数据失败: {e}")
+        return False
+
+def create_backup():
+    """创建数据备份"""
+    try:
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        backup_phone_file = os.path.join(BACKUP_DIR, f'phone_registry_{timestamp}.json')
+        backup_user_file = os.path.join(BACKUP_DIR, f'user_data_{timestamp}.json')
+        
+        backup_created = False
+        
+        # 复制当前数据文件到备份目录
+        if os.path.exists(PHONE_REGISTRY_FILE):
+            shutil.copy2(PHONE_REGISTRY_FILE, backup_phone_file)
+            backup_created = True
+        else:
+            logger.debug("电话注册表文件不存在，跳过备份")
+        
+        if os.path.exists(USER_DATA_FILE):
+            shutil.copy2(USER_DATA_FILE, backup_user_file)
+            backup_created = True
+        else:
+            logger.debug("用户数据文件不存在，跳过备份")
+        
+        if backup_created:
+            logger.info(f"数据备份已创建: {timestamp}")
+        else:
+            logger.debug("没有数据文件需要备份")
+        
+        return True
+    except Exception as e:
+        logger.error(f"创建备份失败: {e}")
+        return False
+
+def cleanup_old_backups():
+    """清理过期的备份文件"""
+    try:
+        if not os.path.exists(BACKUP_DIR):
+            return
+        
+        cutoff_time = datetime.now() - timedelta(days=PRODUCTION_CONFIG['BACKUP_RETENTION_DAYS'])
+        deleted_count = 0
+        
+        for filename in os.listdir(BACKUP_DIR):
+            file_path = os.path.join(BACKUP_DIR, filename)
+            if os.path.isfile(file_path):
+                file_time = datetime.fromtimestamp(os.path.getmtime(file_path))
+                if file_time < cutoff_time:
+                    os.remove(file_path)
+                    deleted_count += 1
+        
+        if deleted_count > 0:
+            logger.info(f"已清理 {deleted_count} 个过期备份文件")
+    except Exception as e:
+        logger.error(f"清理备份文件失败: {e}")
+
 def cleanup_old_data():
-    """清理过期数据"""
+    """清理过期数据（保守策略，延长保留期）"""
     with data_lock:
         current_time = datetime.now()
         cutoff_time = current_time - timedelta(days=PRODUCTION_CONFIG['DATA_RETENTION_DAYS'])
         
-        # 清理过期的电话号码记录
-        expired_phones = []
-        for phone, data in phone_registry.items():
-            if datetime.fromisoformat(data.get('timestamp', '1970-01-01')) < cutoff_time:
-                expired_phones.append(phone)
+        initial_phone_count = len(phone_registry)
+        initial_user_count = len(user_data)
         
-        for phone in expired_phones:
-            del phone_registry[phone]
+        # 清理过期的电话号码记录（只有在数量过多时才清理）
+        if len(phone_registry) > PRODUCTION_CONFIG['MAX_PHONE_REGISTRY_SIZE'] * 0.8:
+            expired_phones = []
+            for phone, data in phone_registry.items():
+                try:
+                    timestamp_str = data.get('timestamp', '1970-01-01')
+                    if 'T' not in timestamp_str:
+                        timestamp_str += 'T00:00:00'
+                    timestamp = datetime.fromisoformat(timestamp_str.replace('Z', '+00:00'))
+                    if timestamp < cutoff_time:
+                        expired_phones.append(phone)
+                except:
+                    # 如果时间解析失败，保留数据
+                    continue
+            
+            for phone in expired_phones:
+                del phone_registry[phone]
         
-        # 清理过期的用户数据
-        expired_users = []
-        for user_id, data in user_data.items():
-            if datetime.fromisoformat(data.get('last_activity', '1970-01-01')) < cutoff_time:
-                expired_users.append(user_id)
+        # 清理过期的用户数据（同样保守策略）
+        if len(user_data) > PRODUCTION_CONFIG['MAX_USER_DATA_SIZE'] * 0.8:
+            expired_users = []
+            for user_id, data in user_data.items():
+                try:
+                    activity_str = data.get('last_activity', '1970-01-01')
+                    if 'T' not in activity_str:
+                        activity_str += 'T00:00:00'
+                    activity_time = datetime.fromisoformat(activity_str.replace('Z', '+00:00'))
+                    if activity_time < cutoff_time:
+                        expired_users.append(user_id)
+                except:
+                    # 如果时间解析失败，保留数据
+                    continue
+            
+            for user_id in expired_users:
+                del user_data[user_id]
         
-        for user_id in expired_users:
-            del user_data[user_id]
-        
-        # 强制内存清理限制
+        # 只有在达到绝对上限时才强制清理
         if len(phone_registry) > PRODUCTION_CONFIG['MAX_PHONE_REGISTRY_SIZE']:
             sorted_phones = sorted(phone_registry.items(), 
                                  key=lambda x: x[1].get('timestamp', '1970-01-01'))
@@ -189,8 +374,14 @@ def cleanup_old_data():
             for user_id, _ in sorted_users[:excess_count]:
                 del user_data[user_id]
         
+        # 在清理后保存数据
+        save_data_to_file()
+        
         gc.collect()
-        logger.info(f"数据清理完成 - 电话记录: {len(phone_registry)}, 用户数据: {len(user_data)}")
+        cleaned_phones = initial_phone_count - len(phone_registry)
+        cleaned_users = initial_user_count - len(user_data)
+        logger.info(f"数据清理完成 - 清理电话记录: {cleaned_phones}, 清理用户数据: {cleaned_users}")
+        logger.info(f"当前数据 - 电话记录: {len(phone_registry)}, 用户数据: {len(user_data)}")
 
 def signal_handler(signum, frame):
     """优雅停机信号处理"""
@@ -243,6 +434,49 @@ def data_cleanup_worker():
                 app_state['error_count'] = 0
     
     logger.info("数据清理工作线程已停止")
+
+def data_save_worker():
+    """数据保存工作线程"""
+    logger.info("💾 数据保存线程已启动")
+    last_backup_hour = -1
+    
+    while app_state['running']:
+        try:
+            time.sleep(PRODUCTION_CONFIG['DATA_SAVE_INTERVAL'])
+            
+            if not app_state['running']:
+                break
+            
+            # 定期保存数据
+            save_success = save_data_to_file()
+            if save_success:
+                logger.debug("定期数据保存成功")
+            
+            # 每小时创建一次备份（避免重复备份）
+            current_time = datetime.now()
+            current_hour = current_time.hour
+            
+            if current_hour != last_backup_hour and current_time.minute < 30:  # 每小时的前30分钟内
+                backup_success = create_backup()
+                if backup_success:
+                    cleanup_old_backups()
+                    last_backup_hour = current_hour
+                    logger.debug(f"小时备份完成: {current_hour}:00")
+                
+        except Exception as e:
+            logger.error(f"数据保存工作线程错误: {e}")
+            time.sleep(60)  # 错误时等待1分钟再继续
+    
+    # 线程结束前最后保存一次数据
+    logger.info("数据保存线程即将停止，执行最终保存...")
+    try:
+        save_data_to_file()
+        create_backup()
+        logger.info("最终数据保存完成")
+    except Exception as e:
+        logger.error(f"最终数据保存失败: {e}")
+    
+    logger.info("数据保存工作线程已停止")
 
 def force_cleanup():
     """强制清理更多数据以释放内存"""
@@ -325,14 +559,25 @@ def extract_phone_numbers(text):
     return list(phone_candidates)
 
 def normalize_phone_format(phone):
-    """标准化电话号码格式"""
+    """增强的电话号码标准化格式"""
+    # 移除所有非数字字符
     digits_only = re.sub(r'\D', '', phone)
     
+    # 处理马来西亚国际代码
     if digits_only.startswith('60'):
         digits_only = digits_only[2:]
     
+    # 验证长度
+    if len(digits_only) < 9 or len(digits_only) > 11:
+        return None
+    
+    # 添加0前缀（如果没有）
     if not digits_only.startswith('0'):
         digits_only = '0' + digits_only
+    
+    # 最终验证
+    if len(digits_only) < 10 or len(digits_only) > 11:
+        return None
     
     return digits_only
 
@@ -434,6 +679,33 @@ def get_user_display_name(user_id, user_info=None):
     except Exception as e:
         logger.error(f"获取用户显示名称错误: {e}")
         return f"用户{user_id}"
+
+def get_simple_user_display_name(user_info):
+    """简化的用户显示名称函数（用于直接传入用户信息字典）"""
+    try:
+        if not isinstance(user_info, dict):
+            return f"用户{user_info}"
+        
+        first_name = user_info.get('first_name', '').strip()
+        last_name = user_info.get('last_name', '').strip()
+        username = user_info.get('username', '').strip()
+        user_id = user_info.get('id', '')
+        
+        # 优先使用全名
+        if first_name or last_name:
+            full_name = f"{first_name} {last_name}".strip()
+            return full_name
+        
+        # 其次使用用户名
+        if username:
+            return f"@{username}"
+        
+        # 最后使用用户ID
+        return f"用户{user_id}"
+        
+    except Exception as e:
+        logger.error(f"获取简化用户显示名称错误: {e}")
+        return f"用户{user_info.get('id', 'Unknown') if isinstance(user_info, dict) else user_info}"
 
 def send_telegram_message(chat_id, text, reply_to_message_id=None):
     """发送Telegram消息（带重试机制）"""
@@ -599,8 +871,9 @@ def handle_command(chat_id, user_id, command, message_id=None):
                 "/help - 帮助信息\n"
                 "/stats - 查看统计\n"
                 "/duplicates - 查看重复号码\n"
+                "/save - 手动保存数据\n"
                 "/clear - 清理数据（管理员）\n\n"
-                f"🚀 <b>版本</b>: 1.5.0 Smart Tracking\n"
+                f"🚀 <b>版本</b>: 1.8.0 Persistent Storage\n"
                 f"⏰ <b>启动时间</b>: {app_state['start_time'].strftime('%Y-%m-%d %H:%M:%S')}"
             )
             send_telegram_message(chat_id, welcome_text, message_id)
@@ -624,6 +897,7 @@ def handle_command(chat_id, user_id, command, message_id=None):
                 "/help - 此帮助\n"
                 "/stats - 统计信息\n"
                 "/duplicates - 查看重复号码详情\n"
+                "/save - 手动保存数据到文件\n"
                 "/clear - 清理数据（仅管理员）\n\n"
                 "💡 <b>提示</b>: 直接发送包含号码的文本即可分析"
             )
@@ -645,7 +919,11 @@ def handle_command(chat_id, user_id, command, message_id=None):
                     f"💾 内存使用: {memory_mb:.1f} MB\n"
                     f"🧹 上次清理: {app_state['last_cleanup'].strftime('%H:%M:%S')}\n"
                     f"❤️ 上次健康检查: {app_state['last_health_check'].strftime('%H:%M:%S')}\n\n"
-                    f"🚀 版本: 1.7.0 Smart Tracking (User Display)\n"
+                    f"🗂️ <b>数据持久化</b>:\n"
+                    f"📂 数据保留期: {PRODUCTION_CONFIG['DATA_RETENTION_DAYS']} 天\n"
+                    f"💾 自动保存: 每 {PRODUCTION_CONFIG['DATA_SAVE_INTERVAL']//60} 分钟\n"
+                    f"📦 备份保留: {PRODUCTION_CONFIG['BACKUP_RETENTION_DAYS']} 天\n\n"
+                    f"🚀 版本: 1.8.0 Persistent Storage (Data Preservation)\n"
                     f"🔄 自动重启: {'✅ 已启用' if app_state['auto_restart_enabled'] else '❌ 已禁用'}"
                 )
                 
@@ -714,6 +992,36 @@ def handle_command(chat_id, user_id, command, message_id=None):
                     message_id
                 )
         
+        elif command == '/save':
+            # 手动保存数据命令
+            try:
+                save_success = save_data_to_file()
+                backup_success = create_backup()
+                
+                if save_success and backup_success:
+                    send_telegram_message(
+                        chat_id,
+                        f"💾 <b>数据保存成功</b>\n\n"
+                        f"📱 电话记录: {len(phone_registry)} 个\n"
+                        f"👥 用户数据: {len(user_data)} 个\n"
+                        f"⏰ 保存时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
+                        f"📂 备份已创建",
+                        message_id
+                    )
+                else:
+                    send_telegram_message(
+                        chat_id,
+                        "❌ 数据保存失败，请查看日志",
+                        message_id
+                    )
+            except Exception as e:
+                logger.error(f"手动保存数据错误: {e}")
+                send_telegram_message(
+                    chat_id,
+                    f"❌ 保存数据时发生错误: {str(e)}",
+                    message_id
+                )
+        
         elif command == '/restart' and user_id in admin_users:
             send_telegram_message(chat_id, "🔄 正在重启机器人...", message_id)
             restart_application()
@@ -745,7 +1053,7 @@ class WebhookHandler(BaseHTTPRequestHandler):
                 'phones_count': len(phone_registry),
                 'users_count': len(user_data),
                 'memory_mb': get_memory_usage_estimate(),
-                'version': '1.5.0 Smart Tracking (Auto-Restart)',
+                'version': '1.8.0 Persistent Storage (Data Preservation)',
                 'auto_restart': app_state['auto_restart_enabled'],
                 'timestamp': datetime.now().isoformat()
             }
@@ -793,8 +1101,8 @@ class WebhookHandler(BaseHTTPRequestHandler):
                     
                     <div class="info">
                         <h3>🚀 版本信息</h3>
-                        <p>版本: 1.7.0 Smart Tracking (User Display)</p>
-                        <p>更新时间: 2025-10-06 (v1.6.0 Enhanced Duplicates)</p>
+                        <p>版本: 1.8.0 Persistent Storage (Data Preservation)</p>
+                        <p>更新时间: 2025-10-13 (v1.8.0 Enhanced Data Persistence)</p>
                         <p>作者: MiniMax Agent</p>
                     </div>
                 </div>
@@ -880,19 +1188,32 @@ def run_server():
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
     
+    # 创建数据目录
+    ensure_data_directories()
+    
+    # 加载已保存的数据
+    logger.info("📂 正在加载历史数据...")
+    load_data_from_file()
+    
     # 启动数据清理线程
     cleanup_thread = threading.Thread(target=data_cleanup_worker, daemon=True)
     cleanup_thread.start()
+    
+    # 启动数据保存线程
+    save_thread = threading.Thread(target=data_save_worker, daemon=True)
+    save_thread.start()
     
     # 设置Webhook
     setup_webhook()
     
     port = int(os.getenv('PORT', 10000))
+    httpd = None
+    heartbeat_thread = None
     
     # 记录启动信息
     logger.info("=" * 60)
     logger.info("🚀 马来西亚电话号码机器人已启动 (长期运行版)")
-    logger.info(f"📦 版本: 1.7.0 Smart Tracking (User Display)")
+    logger.info(f"📦 版本: 1.8.0 Persistent Storage (Data Preservation)")
     logger.info(f"🌐 端口: {port}")
     logger.info(f"💾 内存估算: {get_memory_usage_estimate()} MB")
     logger.info(f"⏰ 启动时间: {app_state['start_time']}")
@@ -921,13 +1242,31 @@ def run_server():
     finally:
         logger.info("🛑 开始优雅停机...")
         app_state['running'] = False
+        
+        # 最后保存一次数据
+        logger.info("💾 执行最终数据保存...")
+        try:
+            save_data_to_file()
+            create_backup()
+        except Exception as e:
+            logger.error(f"最终保存数据失败: {e}")
+        
         logger.info("关闭HTTP服务器...")
         try:
-            httpd.shutdown()
-        except:
-            pass
-        logger.info("等待数据清理线程结束...")
-        cleanup_thread.join(timeout=10)
+            if httpd:
+                httpd.shutdown()
+        except Exception as e:
+            logger.error(f"关闭HTTP服务器失败: {e}")
+        
+        logger.info("等待线程结束...")
+        try:
+            cleanup_thread.join(timeout=10)
+            save_thread.join(timeout=10)
+            if heartbeat_thread:
+                heartbeat_thread.join(timeout=5)
+        except Exception as e:
+            logger.error(f"等待线程结束失败: {e}")
+        
         logger.info("✅ 优雅停机完成")
 
 def heartbeat_monitor():
