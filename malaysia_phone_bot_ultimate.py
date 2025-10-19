@@ -514,7 +514,7 @@ def send_heartbeat():
     """发送心跳信号到Render"""
     try:
         # 向自己的健康检查端点发送请求，保持活跃
-        webhook_url = os.getenv('WEBHOOK_URL') or f"https://telegram-phone-bot-r3gy.onrender.com"
+        webhook_url = os.getenv('WEBHOOK_URL') or f"https://telegram-phone-bot-ouq9.onrender.com"
         health_url = f"{webhook_url}/health"
         
         req = urllib.request.Request(health_url, method='GET')
@@ -1157,7 +1157,7 @@ def setup_webhook():
         webhook_url = os.getenv('WEBHOOK_URL')
         if not webhook_url:
             logger.warning("未设置WEBHOOK_URL环境变量，使用默认URL")
-            webhook_url = "https://telegram-phone-bot-r3gy.onrender.com"
+            webhook_url = "https://telegram-phone-bot-ouq9.onrender.com"
         
         full_webhook_url = f"{webhook_url}/webhook/{BOT_TOKEN}"
         
