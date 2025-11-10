@@ -7,7 +7,7 @@
  
 作者: MiniMax Agent
 版本: 1.8.0 Persistent Storage (Data Preservation)
-更新时间: 2025-10-19 (v1.8.0 Enhanced Data Persistence - FIXED VERSION)
+更新时间: 2025-10-13 (v1.8.0 Enhanced Data Persistence)
 """
 
 import json
@@ -513,7 +513,7 @@ def perform_health_check():
 def send_heartbeat():
     """发送心跳信号到Render"""
     try:
-        # ✅ 修复：使用正确的当前服务URL或从环境变量获取
+        # 向自己的健康检查端点发送请求，保持活跃
         webhook_url = os.getenv('WEBHOOK_URL') or f"https://telegram-phone-bot-ouq9.onrender.com"
         health_url = f"{webhook_url}/health"
         
@@ -559,27 +559,50 @@ def extract_phone_numbers(text):
     return list(phone_candidates)
 
 def normalize_phone_format(phone):
-    """增强的电话号码标准化格式"""
-    # 移除所有非数字字符
-    digits_only = re.sub(r'\D', '', phone)
+    """修复的电话号码标准化格式 - 返回+60国际格式"""
+    # 移除所有非数字字符，但保留+号
+    digits_only = re.sub(r'[^\d\+]', '', phone)
     
-    # 处理马来西亚国际代码
-    if digits_only.startswith('60'):
-        digits_only = digits_only[2:]
+    # 处理以+60开头的国际格式
+    if digits_only.startswith('+60'):
+        cleaned = digits_only[3:]  # 移除+60
+        if len(cleaned) >= 9:
+            if cleaned.startswith('1'):  # 手机号
+                result = '+60' + cleaned
+                return result
+            elif cleaned[0] in '3456789':  # 固话
+                result = '+60' + cleaned
+                return result
     
-    # 验证长度
-    if len(digits_only) < 9 or len(digits_only) > 11:
-        return None
+    # 处理以60开头但无+号的格式
+    elif digits_only.startswith('60') and len(digits_only) >= 11:
+        cleaned = digits_only[2:]  # 移除60
+        if cleaned.startswith('1'):  # 手机号
+            result = '+60' + cleaned
+            return result
+        elif cleaned[0] in '3456789':  # 固话
+            result = '+60' + cleaned
+            return result
     
-    # 添加0前缀（如果没有）
-    if not digits_only.startswith('0'):
-        digits_only = '0' + digits_only
+    # 处理本地格式（以01X或03-09开头）
+    elif digits_only.startswith('0'):
+        # 首先检查手机格式（01X）
+        if len(digits_only) == 10 and digits_only[1] == '1':  # 典型手机格式 01X-XXX-XXXX
+            cleaned = digits_only[1:]  # 移除开头的0，保留1
+            if len(cleaned) >= 9:
+                result = '+60' + cleaned
+                return result
+        
+        # 然后检查固话格式（03-09）
+        elif len(digits_only) >= 8:  # 固话格式 03-09，至少8位
+            if len(digits_only) >= 2 and digits_only[1] in '3456789':  # 固话区域码
+                cleaned = digits_only[1:]  # 移除开头的0
+                if len(cleaned) >= 7:  # 确保有足够位数
+                    result = '+60' + cleaned
+                    return result
     
-    # 最终验证
-    if len(digits_only) < 10 or len(digits_only) > 11:
-        return None
-    
-    return digits_only
+    # 如果都不匹配，返回None
+    return None
 
 @lru_cache(maxsize=1000)
 def analyze_phone_number(normalized_phone):
@@ -873,7 +896,7 @@ def handle_command(chat_id, user_id, command, message_id=None):
                 "/duplicates - 查看重复号码\n"
                 "/save - 手动保存数据\n"
                 "/clear - 清理数据（管理员）\n\n"
-                f"🚀 <b>版本</b>: 1.8.0 Persistent Storage (FIXED)\n"
+                f"🚀 <b>版本</b>: 1.8.0 Persistent Storage\n"
                 f"⏰ <b>启动时间</b>: {app_state['start_time'].strftime('%Y-%m-%d %H:%M:%S')}"
             )
             send_telegram_message(chat_id, welcome_text, message_id)
@@ -923,7 +946,7 @@ def handle_command(chat_id, user_id, command, message_id=None):
                     f"📂 数据保留期: {PRODUCTION_CONFIG['DATA_RETENTION_DAYS']} 天\n"
                     f"💾 自动保存: 每 {PRODUCTION_CONFIG['DATA_SAVE_INTERVAL']//60} 分钟\n"
                     f"📦 备份保留: {PRODUCTION_CONFIG['BACKUP_RETENTION_DAYS']} 天\n\n"
-                    f"🚀 版本: 1.8.0 Persistent Storage (FIXED VERSION)\n"
+                    f"🚀 版本: 1.8.0 Persistent Storage (Data Preservation)\n"
                     f"🔄 自动重启: {'✅ 已启用' if app_state['auto_restart_enabled'] else '❌ 已禁用'}"
                 )
                 
@@ -1022,94 +1045,130 @@ def handle_command(chat_id, user_id, command, message_id=None):
                     message_id
                 )
         
+        elif command == '/restart' and user_id in admin_users:
+            send_telegram_message(chat_id, "🔄 正在重启机器人...", message_id)
+            restart_application()
+            
         else:
             send_telegram_message(
                 chat_id,
-                "❓ 未知命令，请使用 /help 查看可用命令",
+                "❓ 未知命令，发送 /help 查看可用命令",
                 message_id
             )
             
     except Exception as e:
         logger.error(f"处理命令错误: {e}")
-        send_telegram_message(chat_id, "❌ 处理命令时发生错误，请稍后重试")
+        send_telegram_message(chat_id, "❌ 处理命令时发生错误")
 
 class WebhookHandler(BaseHTTPRequestHandler):
     """Webhook处理器"""
     
-    def do_POST(self):
-        """处理POST请求"""
-        try:
-            if not self.path.startswith(f'/webhook/{BOT_TOKEN}'):
-                self.send_response(404)
-                self.end_headers()
-                return
-            
-            content_length = int(self.headers.get('Content-Length', 0))
-            
-            if content_length > 10 * 1024 * 1024:  # 10MB limit
-                self.send_response(413)
-                self.end_headers()
-                return
-            
-            post_data = self.rfile.read(content_length)
-            
-            try:
-                update = json.loads(post_data.decode('utf-8'))
-            except json.JSONDecodeError:
-                self.send_response(400)
-                self.end_headers()
-                return
-            
-            # 更新请求计数
-            app_state['request_count'] += 1
-            
-            # 处理更新
-            if 'message' in update:
-                handle_text(update['message'])
-            
-            # 发送响应
-            self.send_response(200)
-            self.send_header('Content-Type', 'application/json')
-            self.end_headers()
-            self.wfile.write(b'{"ok": true}')
-            
-        except Exception as e:
-            logger.error(f"处理webhook请求错误: {e}")
-            try:
-                self.send_response(500)
-                self.end_headers()
-            except:
-                pass
-    
     def do_GET(self):
-        """处理GET请求（健康检查）"""
+        """处理GET请求（健康检查等）"""
+        if self.path == '/health':
+            self.send_response(200)
+            self.send_header('Content-type', 'application/json')
+            self.end_headers()
+            
+            status = {
+                'status': 'healthy',
+                'uptime': str(datetime.now() - app_state['start_time']),
+                'phones_count': len(phone_registry),
+                'users_count': len(user_data),
+                'memory_mb': get_memory_usage_estimate(),
+                'version': '1.8.0 Persistent Storage (Data Preservation)',
+                'auto_restart': app_state['auto_restart_enabled'],
+                'timestamp': datetime.now().isoformat()
+            }
+            
+            self.wfile.write(json.dumps(status, ensure_ascii=False).encode('utf-8'))
+            
+        elif self.path == '/':
+            self.send_response(200)
+            self.send_header('Content-type', 'text/html; charset=utf-8')
+            self.end_headers()
+            
+            html = f"""
+            <!DOCTYPE html>
+            <html>
+            <head>
+                <meta charset="utf-8">
+                <title>马来西亚电话号码机器人</title>
+                <style>
+                    body {{ font-family: Arial, sans-serif; margin: 40px; background: #f5f5f5; }}
+                    .container {{ background: white; padding: 30px; border-radius: 10px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }}
+                    h1 {{ color: #2196F3; }}
+                    .status {{ color: #4CAF50; font-weight: bold; }}
+                    .info {{ background: #E3F2FD; padding: 15px; border-radius: 5px; margin: 15px 0; }}
+                </style>
+            </head>
+            <body>
+                <div class="container">
+                    <h1>🇲🇾 马来西亚电话号码机器人</h1>
+                    <p class="status">✅ 服务正常运行</p>
+                    
+                    <div class="info">
+                        <h3>📊 实时状态</h3>
+                        <p>📱 已记录号码: {len(phone_registry)}</p>
+                        <p>👥 活跃用户: {len(user_data)}</p>
+                        <p>⏰ 运行时间: {datetime.now() - app_state['start_time']}</p>
+                        <p>💾 内存使用: {get_memory_usage_estimate():.1f} MB</p>
+                        <p>🔄 自动重启: {'已启用' if app_state['auto_restart_enabled'] else '已禁用'}</p>
+                    </div>
+                    
+                    <div class="info">
+                        <h3>🤖 Telegram机器人</h3>
+                        <p>在Telegram中搜索机器人并发送电话号码即可使用</p>
+                        <p>支持马来西亚手机号码和固话号码的智能识别</p>
+                    </div>
+                    
+                    <div class="info">
+                        <h3>🚀 版本信息</h3>
+                        <p>版本: 1.8.0 Persistent Storage (Data Preservation)</p>
+                        <p>更新时间: 2025-10-13 (v1.8.0 Enhanced Data Persistence)</p>
+                        <p>作者: MiniMax Agent</p>
+                    </div>
+                </div>
+            </body>
+            </html>
+            """
+            
+            self.wfile.write(html.encode('utf-8'))
+        else:
+            self.send_response(404)
+            self.end_headers()
+    
+    def do_POST(self):
+        """处理POST请求（Telegram Webhook）"""
         try:
-            if self.path == '/health' or self.path == '/':
-                self.send_response(200)
-                self.send_header('Content-Type', 'application/json')
-                self.end_headers()
+            if self.path == f'/webhook/{BOT_TOKEN}':
+                content_length = int(self.headers['Content-Length'])
+                post_data = self.rfile.read(content_length)
                 
-                health_info = {
-                    'status': 'ok',
-                    'uptime_seconds': int((datetime.now() - app_state['start_time']).total_seconds()),
-                    'phone_registry_size': len(phone_registry),
-                    'user_data_size': len(user_data),
-                    'memory_estimate_mb': get_memory_usage_estimate(),
-                    'request_count': app_state['request_count'],
-                    'version': '1.8.0 Persistent Storage (FIXED VERSION)'
-                }
-                
-                self.wfile.write(json.dumps(health_info).encode('utf-8'))
+                try:
+                    data = json.loads(post_data.decode('utf-8'))
+                    
+                    if 'message' in data:
+                        handle_text(data['message'])
+                    
+                    self.send_response(200)
+                    self.send_header('Content-type', 'application/json')
+                    self.end_headers()
+                    self.wfile.write(b'{"ok": true}')
+                    
+                except json.JSONDecodeError as e:
+                    logger.error(f"JSON解析错误: {e}")
+                    self.send_response(400)
+                    self.end_headers()
+                    
             else:
                 self.send_response(404)
                 self.end_headers()
+                
         except Exception as e:
-            logger.error(f"处理健康检查请求错误: {e}")
-            try:
-                self.send_response(500)
-                self.end_headers()
-            except:
-                pass
+            logger.error(f"POST请求处理错误: {e}")
+            self.send_response(500)
+            self.end_headers()
     
     def log_message(self, format, *args):
         """重写日志方法以避免重复日志"""
@@ -1121,7 +1180,6 @@ def setup_webhook():
         webhook_url = os.getenv('WEBHOOK_URL')
         if not webhook_url:
             logger.warning("未设置WEBHOOK_URL环境变量，使用默认URL")
-            # ✅ 修复：使用正确的当前服务URL
             webhook_url = "https://telegram-phone-bot-ouq9.onrender.com"
         
         full_webhook_url = f"{webhook_url}/webhook/{BOT_TOKEN}"
@@ -1178,7 +1236,7 @@ def run_server():
     # 记录启动信息
     logger.info("=" * 60)
     logger.info("🚀 马来西亚电话号码机器人已启动 (长期运行版)")
-    logger.info(f"📦 版本: 1.8.0 Persistent Storage (FIXED VERSION)")
+    logger.info(f"📦 版本: 1.8.0 Persistent Storage (Data Preservation)")
     logger.info(f"🌐 端口: {port}")
     logger.info(f"💾 内存估算: {get_memory_usage_estimate()} MB")
     logger.info(f"⏰ 启动时间: {app_state['start_time']}")
